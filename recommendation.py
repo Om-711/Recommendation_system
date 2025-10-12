@@ -23,29 +23,42 @@ def making_data():
     db = client["ECommerce"]
 
     product_collection = db["products"]
+    user_data_collection = db["users"]
 
     products = list(product_collection.find())
+    users  = list(user_data_collection.find())
 
     product_data = []
     for p in products:
         product_data.append({
-            "id": str(p["_id"]),
-            "name": p["name"],
-            "price": p["price"],
-            "category": p["category"],
-            "description": p.get("description", ""),
-            "images": p.get("images", "Not Found"),
-            "stock" : p.get("stock", "0"),
-            "rating" : p.get("rating", "0"),
-            "reviews" : p.get("reviews", "0"),
-            "createdAt": p.get("createdAt", ""),
-            "updatedAt": p.get("updatedAt", ""),
-            "isActive": p.get("isActive", True)
+            "ID": str(p["_id"]),
+            "Name": p["name"],
+            "Price": p["price"],
+            "Category": p["category"],
+            "Description": p.get("description", ""),
+            "Images": p.get("images", "Not Found"),
+            "Stock" : p.get("stock", "0"),
+            "Rating" : p.get("rating", "0"),
+            "Reviews" : p.get("reviews", "0"),
+            "CreatedAt": p.get("createdAt", ""),
+            "UpdatedAt": p.get("updatedAt", ""),
+            "IsActive": p.get("isActive", True)
         })
 
-    df = pd.DataFrame(product_data)
-    
-    return df
+    user_data = []
+    for u in users:
+        for history in u.get("history", []):
+            user_data.append({
+                "user_id": str(u["_id"]),
+                "ProdID": str(history.get("productId", "")),
+                "Event": history.get("event", ""),
+                "Timestamp": history.get("timestamp", "")
+            })
+
+    df_products = pd.DataFrame(product_data)
+    print(df_products.head())
+
+    return df_products
 
 
 def content_based_recommendations(df, item_name, top_n=10):
@@ -54,7 +67,7 @@ def content_based_recommendations(df, item_name, top_n=10):
         return pd.DataFrame()
 
     tfidf_vectorizer = TfidfVectorizer(stop_words='english')
-    tfidf_matrix_content = tfidf_vectorizer.fit_transform(df['Tags'])
+    tfidf_matrix_content = tfidf_vectorizer.fit_transform(df['Description'].fillna(''))
 
     cosine_similarities_content = cosine_similarity(tfidf_matrix_content, tfidf_matrix_content)
     item_index = df[df['Name'] == item_name].index[0]
@@ -65,7 +78,7 @@ def content_based_recommendations(df, item_name, top_n=10):
     top_similar_items = similar_items[1:top_n+1]
     recommended_item_indices = [x[0] for x in top_similar_items]
 
-    recommended_items_details = df.iloc[recommended_item_indices][['Name', 'ReviewCount', 'Brand', 'ImageURL', 'Rating']]
+    recommended_items_details = df.iloc[recommended_item_indices][['ID', 'Name', 'Price', 'Category', 'Description', 'Images', 'Rating', 'Reviews']]
     
     return recommended_items_details
 
@@ -82,7 +95,7 @@ def collaborative_filtering_recommendations(df, target_user_id, top_n=10):
         not_rated_by_target_user = (rated_by_similar_user == 0) & (user_item_matrix.iloc[target_user_index] == 0)
         recommended_items.extend(user_item_matrix.columns[not_rated_by_target_user][:top_n])
 
-    recommended_items_details = df[df['ProdID'].isin(recommended_items)][['Name', 'ReviewCount', 'Brand', 'ImageURL', 'Rating']]
+    recommended_items_details = df[df['ID'].isin(recommended_items)][['Name', 'Reviews', 'Category', 'Images', 'Rating']]
     return recommended_items_details.head(10)
 
 def hybrid_recommendation_system(df, target_user_id, item_name, top_n=10):
@@ -103,8 +116,8 @@ def get_closest_match(user_input, all_product_names):
     return match if score > 60 else None  # adjust threshold as needed
 
 def als_recommendation(user_id, user_history=None):
-    df = pd.read_csv(r"D:\College\SEM 5\LAB\SE\dataset\data.csv", nrows=10000)
-    df = df.rename(columns={'event_type':'event'})
+    # df = pd.read_csv(r"D:\College\SEM 5\LAB\SE\dataset\data.csv", nrows=10000)
+    _, df = making_data() 
 
     event_weights = {
         'view': 1.0,
@@ -125,13 +138,13 @@ def als_recommendation(user_id, user_history=None):
         df['event'] = df['event'].astype(str).str.lower()
         df['weight'] = df['event'].map(event_weights).fillna(0.0).astype(float)
 
-    agg = df.groupby(['user_id', 'product_id'])['weight'].sum().reset_index()
+    agg = df.groupby(['user_id', 'ProdID'])['weight'].sum().reset_index()
     user_encoder = LabelEncoder()
     item_encoder = LabelEncoder()
     user_encoder.fit(agg['user_id'])
-    item_encoder.fit(agg['product_id'])
+    item_encoder.fit(agg['ProdID'])
     agg['user_idx'] = user_encoder.transform(agg['user_id'])
-    agg['item_idx'] = item_encoder.transform(agg['product_id'])
+    agg['item_idx'] = item_encoder.transform(agg['ProdID'])
 
     interactions = coo_matrix(
         (agg['weight'].astype(float), (agg['user_idx'], agg['item_idx'])),
@@ -145,9 +158,9 @@ def als_recommendation(user_id, user_history=None):
 
 def get_top_popular_purchases(user_id, df, N=5):
     purchases_df = df[df['event'] == 'purchase']
-    purchase_counts = purchases_df['product_id'].value_counts()
+    purchase_counts = purchases_df['ProdID'].value_counts()
     user_df = df[df['user_id'] == user_id]
-    user_product_popularity = user_df.groupby('product_id')['weight'].sum().sort_values(ascending=False)
+    user_product_popularity = user_df.groupby('ProdID')['weight'].sum().sort_values(ascending=False)
     return user_product_popularity.index[:N].tolist()
 
 def get_als_recommendations(user_id, model, user_encoder, item_encoder, interactions, N=5):
