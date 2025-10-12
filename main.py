@@ -6,6 +6,7 @@ from starlette.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 
 from recommendation import (
@@ -26,12 +27,11 @@ app.add_middleware(
         'http://localhost:5173',
         'http://localhost:5174',
     ], 
-    
+
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 
 # templates me html code
@@ -79,10 +79,15 @@ async def main_page(request: Request):
 #     recom_json = recommended_products.to_dict(orient="records")
 
 #     return JSONResponse(content={"recommendations": recom_json})
+class RecommendRequest(BaseModel):
+    item_name: str
+    user_id: int | None = None
 
 @app.post("/recommend")
-async def recommend(item_name: str = Form(...), user_id: int = Form(None)):
-
+async def recommend(req: RecommendRequest):
+    item_name = req.item_name
+    user_id = req.user_id
+    print(f"Received item_name: {item_name}, user_id: {user_id}")
     df = making_data_endpoint()
     
     if not user_id:  
