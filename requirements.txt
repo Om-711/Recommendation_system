@@ -7,6 +7,6 @@ scikit-learn
 scipy
 python-dotenv
 pymongo
-multi-party
+multi-part
 implicit
 jinja2
