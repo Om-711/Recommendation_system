@@ -10,3 +10,4 @@ pymongo
 python-multipart
 implicit
 jinja2
+pymysql
