@@ -91,7 +91,7 @@ async def recommend(req: RecommendRequest):
     df = making_data_endpoint()
     
     if not user_id:  
-        corrected_item_name = get_closest_match(item_name, df['Name'].tolist())
+        corrected_item_name = get_closest_match(item_name, df['name'].tolist())
         recommendations = content_based_recommendations(df, corrected_item_name, top_n=10)
     else:
         recommendations = hybrid_recommendation_system(df, user_id, item_name, top_n=10)
