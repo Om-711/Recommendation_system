@@ -31,18 +31,18 @@ def making_data():
     product_data = []
     for p in products:
         product_data.append({
-            "ID": str(p["_id"]),
-            "Name": p["name"],
-            "Price": p["price"],
-            "Category": p["category"],
-            "Description": p.get("description", ""),
-            "Images": p.get("images", "Not Found"),
-            "Stock" : p.get("stock", "0"),
-            "Rating" : p.get("rating", "0"),
-            "Reviews" : p.get("reviews", "0"),
-            "CreatedAt": p.get("createdAt", ""),
-            "UpdatedAt": p.get("updatedAt", ""),
-            "IsActive": p.get("isActive", True)
+            "productID": str(p["_id"]),
+            "name": p["name"],
+            "price": p["price"],
+            "category": p["category"],
+            "description": p.get("description", ""),
+            "images": p.get("images", "Not Found"),
+            "stock" : p.get("stock", "0"),
+            "rating" : p.get("rating", "0"),
+            "reviews" : p.get("reviews", "0"),
+            "createdAt": p.get("createdAt", ""),
+            "updatedAt": p.get("updatedAt", ""),
+            "isActive": p.get("isActive", True)
         })
 
     user_data = []
@@ -62,15 +62,15 @@ def making_data():
 
 
 def content_based_recommendations(df, item_name, top_n=10):
-    if item_name not in df['Name'].values:
+    if item_name not in df['name'].values:
         print(f"Item '{item_name}' not found in the training data.")
         return pd.DataFrame()
 
     tfidf_vectorizer = TfidfVectorizer(stop_words='english')
-    tfidf_matrix_content = tfidf_vectorizer.fit_transform(df['Description'].fillna(''))
+    tfidf_matrix_content = tfidf_vectorizer.fit_transform(df['description'].fillna(''))
 
     cosine_similarities_content = cosine_similarity(tfidf_matrix_content, tfidf_matrix_content)
-    item_index = df[df['Name'] == item_name].index[0]
+    item_index = df[df['name'] == item_name].index[0]
 
     similar_items = list(enumerate(cosine_similarities_content[item_index]))
     similar_items = sorted(similar_items, key=lambda x: x[1], reverse=True)
@@ -78,12 +78,12 @@ def content_based_recommendations(df, item_name, top_n=10):
     top_similar_items = similar_items[1:top_n+1]
     recommended_item_indices = [x[0] for x in top_similar_items]
 
-    recommended_items_details = df.iloc[recommended_item_indices][['ID', 'Name', 'Price', 'Category', 'Description', 'Images', 'Rating', 'Reviews']]
+    recommended_items_details = df.iloc[recommended_item_indices][['productID', 'name', 'price', 'category', 'description', 'images', 'rating', 'reviews']]
     
     return recommended_items_details
 
 def collaborative_filtering_recommendations(df, target_user_id, top_n=10):
-    user_item_matrix = df.pivot_table(index='ID', columns='ProdID', values='Rating', aggfunc='mean').fillna(0)
+    user_item_matrix = df.pivot_table(index='productID', columns='ProdID', values='Rating', aggfunc='mean').fillna(0)
     user_similarity = cosine_similarity(user_item_matrix)
     target_user_index = user_item_matrix.index.get_loc(target_user_id)
     user_similarities = user_similarity[target_user_index]
@@ -95,7 +95,7 @@ def collaborative_filtering_recommendations(df, target_user_id, top_n=10):
         not_rated_by_target_user = (rated_by_similar_user == 0) & (user_item_matrix.iloc[target_user_index] == 0)
         recommended_items.extend(user_item_matrix.columns[not_rated_by_target_user][:top_n])
 
-    recommended_items_details = df[df['ID'].isin(recommended_items)][['Name', 'Reviews', 'Category', 'Images', 'Rating']]
+    recommended_items_details = df[df['productID'].isin(recommended_items)][['name', 'reviews', 'category', 'images', 'rating']]
     return recommended_items_details.head(10)
 
 def hybrid_recommendation_system(df, target_user_id, item_name, top_n=10):
@@ -105,9 +105,9 @@ def hybrid_recommendation_system(df, target_user_id, item_name, top_n=10):
     return combined_recommendations
 
 def rating_based_recommendation_system(df):
-    group_columns = [col for col in df.columns if col != 'Rating']
-    grouped_df = df.groupby(group_columns)['Rating'].mean().reset_index()
-    sorted_df = grouped_df.sort_values(by='Rating', ascending=False)
+    group_columns = [col for col in df.columns if col != 'rating']
+    grouped_df = df.groupby(group_columns)['rating'].mean().reset_index()
+    sorted_df = grouped_df.sort_values(by='rating', ascending=False)
     top_10 = sorted_df.head(10)
     return top_10
 
@@ -138,13 +138,13 @@ def als_recommendation(user_id, user_history=None):
         df['event'] = df['event'].astype(str).str.lower()
         df['weight'] = df['event'].map(event_weights).fillna(0.0).astype(float)
 
-    agg = df.groupby(['user_id', 'ProdID'])['weight'].sum().reset_index()
+    agg = df.groupby(['user_id', 'productID'])['weight'].sum().reset_index()
     user_encoder = LabelEncoder()
     item_encoder = LabelEncoder()
     user_encoder.fit(agg['user_id'])
-    item_encoder.fit(agg['ProdID'])
+    item_encoder.fit(agg['productID'])
     agg['user_idx'] = user_encoder.transform(agg['user_id'])
-    agg['item_idx'] = item_encoder.transform(agg['ProdID'])
+    agg['item_idx'] = item_encoder.transform(agg['productID'])
 
     interactions = coo_matrix(
         (agg['weight'].astype(float), (agg['user_idx'], agg['item_idx'])),
@@ -158,9 +158,9 @@ def als_recommendation(user_id, user_history=None):
 
 def get_top_popular_purchases(user_id, df, N=5):
     purchases_df = df[df['event'] == 'purchase']
-    purchase_counts = purchases_df['ProdID'].value_counts()
+    purchase_counts = purchases_df['productID'].value_counts()
     user_df = df[df['user_id'] == user_id]
-    user_product_popularity = user_df.groupby('ProdID')['weight'].sum().sort_values(ascending=False)
+    user_product_popularity = user_df.groupby('productID')['weight'].sum().sort_values(ascending=False)
     return user_product_popularity.index[:N].tolist()
 
 def get_als_recommendations(user_id, model, user_encoder, item_encoder, interactions, N=5):
@@ -188,4 +188,3 @@ def combined_recommendations(user_id, model, user_encoder, item_encoder, interac
     popular_recs = get_top_popular_purchases(user_id, df, N=E)
     combined = list(als_recs) + [item for item in popular_recs if item not in als_recs]
     return combined[:N]
-
