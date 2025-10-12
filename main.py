@@ -37,7 +37,7 @@ templates = Jinja2Templates(directory="templates")
 async def index():
     return RedirectResponse(url="/docs")
 
-@app.post("/making_data", response_class=JSONResponse)
+# @app.post("/making_data", response_class=JSONResponse)
 def making_data_endpoint():
     df = making_data()
     return df
