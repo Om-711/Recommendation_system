@@ -44,6 +44,7 @@ def making_data_endpoint():
 
 @app.post("/main", response_class=JSONResponse)
 async def main_page(request: Request):
+    df = making_data_endpoint()
     top_products = rating_based_recommendation_system(df)
 
     if hasattr(top_products, "to_dict"):
@@ -55,24 +56,24 @@ async def main_page(request: Request):
     
     return JSONResponse(content={"Top_rated_products": recs})
 
-@app.post("/als-recommend", response_class=JSONResponse)
-async def als_recommend(user_id: int):  
+# @app.post("/als-recommend", response_class=JSONResponse)
+# async def als_recommend(user_id: int):  
     
-    df1 = pd.read_csv("D:\College\SEM 5\LAB\SE\dataset\data.csv", nrows=10000)
-    df = making_data_endpoint()
+#     df1 = pd.read_csv("D:\College\SEM 5\LAB\SE\dataset\data.csv", nrows=10000)
+#     df = making_data_endpoint()
 
-    if user_id not in df1['user_id'].unique():
-        return JSONResponse(content={"Error": "User not Found"}, status_code=404)
+#     if user_id not in df1['user_id'].unique():
+#         return JSONResponse(content={"Error": "User not Found"}, status_code=404)
     
-    model, user_encoder, item_encoder, interactions = als_recommendation(user_id)
+#     model, user_encoder, item_encoder, interactions = als_recommendation(user_id)
 
-    recom = get_als_recommendations(user_id, model, user_encoder, item_encoder, interactions)
+#     recom = get_als_recommendations(user_id, model, user_encoder, item_encoder, interactions)
 
-    recommended_products = df[df['product_id'].isin(recom)]['category_code'].unique()
+#     recommended_products = df[df['product_id'].isin(recom)]['category_code'].unique()
 
-    recom_json = recommended_products.to_dict(orient="records")
+    # recom_json = recommended_products.to_dict(orient="records")
 
-    return JSONResponse(content={"recommendations": recom_json})
+    # return JSONResponse(content={"recommendations": recom_json})
 
 @app.post("/recommend")
 async def recommend(item_name: str = Form(...), user_id: int = Form(None)):
