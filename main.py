@@ -71,24 +71,21 @@ async def main_page(request: Request):
 
 #     recommended_products = df[df['product_id'].isin(recom)]['category_code'].unique()
 
-    # recom_json = recommended_products.to_dict(orient="records")
+#     recom_json = recommended_products.to_dict(orient="records")
 
-    # return JSONResponse(content={"recommendations": recom_json})
+#     return JSONResponse(content={"recommendations": recom_json})
 
 @app.post("/recommend")
 async def recommend(item_name: str = Form(...), user_id: int = Form(None)):
 
     df = making_data_endpoint()
     
-    if user_id in (None, "", "None"):
-        user_id = None
+    if not user_id:  
+        corrected_item_name = get_closest_match(item_name, df['Name'].tolist())
+        recommendations = content_based_recommendations(df, corrected_item_name, top_n=10)
     else:
-        user_id = int(user_id)
-
-    if user_id is not None:
         recommendations = hybrid_recommendation_system(df, user_id, item_name, top_n=10)
-    else:
-        recommendations = content_based_recommendations(df, item_name, top_n=10)
+    print(recommendations)
 
     recs_json = recommendations.to_dict(orient="records")
 
