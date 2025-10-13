@@ -21,7 +21,8 @@ from recommendation import (
     get_closest_match,
     als_recommendation,
     get_als_recommendations,
-    making_data
+    making_data,
+    content_based_recommendations_improved
 )
 
 app = FastAPI()
@@ -48,9 +49,12 @@ async def index():
     return RedirectResponse(url="/docs")
 
 def making_data_endpoint():
-    df = making_data()
+    df,_ = making_data()
     return df
 
+def making_user_data_endopoints():
+    _,df = making_data()
+    return df
 
 def make_serializable(obj):
     """Recursively convert obj into JSON-serializable Python primitives."""
@@ -109,21 +113,26 @@ async def main_page(request: Request):
 # @app.post("/als-recommend", response_class=JSONResponse)
 # async def als_recommend(user_id: int):  
     
-#     df1 = pd.read_csv("D:\College\SEM 5\LAB\SE\dataset\data.csv", nrows=10000)
-#     df = making_data_endpoint()
+#     # df1 = pd.read_csv("D:\College\SEM 5\LAB\SE\dataset\data.csv", nrows=10000)
+#     df_product, df_user = making_data_endpoint()
 
-#     if user_id not in df1['user_id'].unique():
+#     if user_id not in df_user['user_id'].unique():
 #         return JSONResponse(content={"Error": "User not Found"}, status_code=404)
     
 #     model, user_encoder, item_encoder, interactions = als_recommendation(user_id)
 
 #     recom = get_als_recommendations(user_id, model, user_encoder, item_encoder, interactions)
 
-#     recommended_products = df[df['product_id'].isin(recom)]['category_code'].unique()
+#     recommended_products = df_product[df_product['productID'].isin(recom)]['category'].unique()
 
-#     recom_json = recommended_products.to_dict(orient="records")
+#     if isinstance(recommended_products, pd.DataFrame):
+#         recommendations = recommended_products.to_dict(orient="records")
 
-#     return JSONResponse(content={"recommendations": recom_json})
+#     recs_json_serializable = make_serializable(recommendations)
+
+#     return JSONResponse(content={"recommendations": recs_json_serializable})
+
+
 class RecommendRequest(BaseModel):
     item_name: str
     user_id: int | None = None
@@ -135,9 +144,11 @@ async def recommend(req: RecommendRequest):
     print(f"Received item_name: {item_name}, user_id: {user_id}")
     df = making_data_endpoint()
     
+    corrected_item_name = get_closest_match(item_name, df['name'].tolist())
+    
     if not user_id:  
-        corrected_item_name = get_closest_match(item_name, df['name'].tolist())
-        recommendations = content_based_recommendations(df, corrected_item_name, top_n=10)
+        recommendations = content_based_recommendations_improved(df, corrected_item_name, top_n=10)
+        # recommendations = content_based_recommendations(df, corrected_item_name, top_n=10)
     else:
         recommendations = hybrid_recommendation_system(df, user_id, item_name, top_n=10)
     print(recommendations)
