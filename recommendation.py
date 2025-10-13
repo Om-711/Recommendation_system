@@ -51,15 +51,19 @@ def making_data():
         for history in u.get("history", []):
             user_data.append({
                 "user_id": str(u["_id"]),
-                "ProdID": str(history.get("productId", "")),
-                "Event": history.get("event", ""),
-                "Timestamp": history.get("timestamp", "")
+                "productID": str(history.get("productId", "")),
+                "Event": history.get("event", {}).get("type","Not Found"),
+                "Timestamp": history.get("time", ""),
+                "duration":history.get("duration", 0)/1000 # Convert milli-second to second betwa
             })
 
     df_products = pd.DataFrame(product_data)
     print(df_products.head())
 
-    return df_products
+    df_user = pd.DataFrame(user_data)
+    print(df_user.head())
+
+    return df_products, df_user
 
 
 def content_based_recommendations(df, item_name, top_n=10):
@@ -83,8 +87,104 @@ def content_based_recommendations(df, item_name, top_n=10):
     
     return recommended_items_details
 
+
+
+def content_based_recommendations_improved(df, item_name, top_n=10, weights=None, 
+                                           filter_same_category=False, verbose=False):
+   
+    # defaults
+    if weights is None:
+        weights = {
+            'name': 0.40,       # strong signal from exact name/title
+            'desc': 0.20,       # semantic text similarity
+            'category': 0.30,   # categorical match
+            'price': 0.10,      # price proximity
+        }
+
+    # Basic checks
+    if item_name not in df['name'].values:
+        if verbose:
+            print(f"Item '{item_name}' not found.")
+        return pd.DataFrame()
+
+    # Ensure required columns exist; create safe fallbacks
+    for col in ['description', 'category', 'price', 'rating', 'reviews']:
+        if col not in df.columns:
+            if col == 'reviews':
+                df['reviews'] = [[]] * len(df)
+            elif col == 'price':
+                df['price'] = 0.0
+            else:
+                df[col] = ''
+
+    # Prepare text fields
+    df = df.copy()
+    df['name_text'] = df['name'].fillna('').astype(str)
+    df['desc_text'] = df['description'].fillna('').astype(str)
+    df['category_text'] = df['category'].fillna('').astype(str)
+
+    # Vectorizers: name (with ngrams to catch short brand/model matches), desc (TF-IDF), category (tfidf or simple one-hot)
+    name_vec = TfidfVectorizer(analyzer='char_wb', ngram_range=(3, 6))   # good for short product titles/brands
+    desc_vec = TfidfVectorizer(stop_words='english', ngram_range=(1,2))
+    cat_vec  = TfidfVectorizer()  # category labels are short, simple TF-IDF works
+
+    name_tfidf = name_vec.fit_transform(df['name_text'])
+    desc_tfidf = desc_vec.fit_transform(df['desc_text'])
+    cat_tfidf  = cat_vec.fit_transform(df['category_text'])
+
+    # find query item index
+    item_idx = int(df[df['name'] == item_name].index[0])
+    if verbose:
+        print("Found item index:", item_idx, "name:", df.at[item_idx, 'name'])
+
+    # Optionally filter candidate indices by same category
+    if filter_same_category:
+        target_cat = df.at[item_idx, 'category_text']
+        candidate_mask = df['category_text'] == target_cat
+        candidate_indices = np.where(candidate_mask)[0]
+        if len(candidate_indices) <= 1:  # nothing else in same category
+            candidate_indices = np.arange(len(df))
+    else:
+        candidate_indices = np.arange(len(df))
+
+    # Compute similarities (vectorized)
+    # name similarity
+    name_sim = cosine_similarity(name_tfidf[item_idx], name_tfidf).ravel()[candidate_indices]
+    # description similarity
+    desc_sim = cosine_similarity(desc_tfidf[item_idx], desc_tfidf).ravel()[candidate_indices]
+    # category similarity
+    cat_sim  = cosine_similarity(cat_tfidf[item_idx], cat_tfidf).ravel()[candidate_indices]
+
+    # Price similarity: 1 - normalized distance (clamped 0..1)
+    prices = df['price'].fillna(0).astype(float).values
+    price_range = prices.max() - prices.min() + 1e-9
+    target_price = prices[item_idx]
+    price_dist_norm = np.abs(prices[candidate_indices] - target_price) / price_range
+    price_sim = 1.0 - price_dist_norm  # higher = more similar price
+    price_sim = np.clip(price_sim, 0.0, 1.0)
+   
+    # Combine by weighted sum (ensure weights sum to 1 or allow raw weights)
+    total_weight = sum(weights.values())
+    w = {k: v / total_weight for k, v in weights.items()}
+
+    final_score = (
+        w['name'] * name_sim +
+        w['desc'] * desc_sim +
+        w['category'] * cat_sim +
+        w['price'] * price_sim 
+    )
+
+    candidates_df = df.iloc[candidate_indices].copy().reset_index(drop=True)
+    candidates_df['score'] = final_score
+
+    mask_not_self = candidates_df['name'] != item_name
+    results = candidates_df[mask_not_self].sort_values('score', ascending=False).head(top_n)
+
+    return results
+
+
 def collaborative_filtering_recommendations(df, target_user_id, top_n=10):
-    user_item_matrix = df.pivot_table(index='productID', columns='ProdID', values='Rating', aggfunc='mean').fillna(0)
+    user_item_matrix = df.pivot_table(index='user_id', columns='productID', values='rating', aggfunc='mean').fillna(0)
     user_similarity = cosine_similarity(user_item_matrix)
     target_user_index = user_item_matrix.index.get_loc(target_user_id)
     user_similarities = user_similarity[target_user_index]
@@ -189,4 +289,3 @@ def combined_recommendations(user_id, model, user_encoder, item_encoder, interac
     popular_recs = get_top_popular_purchases(user_id, df, N=E)
     combined = list(als_recs) + [item for item in popular_recs if item not in als_recs]
     return combined[:N]
-
