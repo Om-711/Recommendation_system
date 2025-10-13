@@ -30,20 +30,21 @@ def making_data():
 
     product_data = []
     for p in products:
-        product_data.append({
-            "productID": str(p["_id"]),
-            "name": p["name"],
-            "price": p["price"],
-            "category": p["category"],
-            "description": p.get("description", ""),
-            "images": p.get("images", "Not Found"),
-            "stock" : p.get("stock", "0"),
-            "rating" : p.get("rating", "0"),
-            "reviews" : p.get("reviews", "0"),
-            "createdAt": p.get("createdAt", ""),
-            "updatedAt": p.get("updatedAt", ""),
-            "isActive": p.get("isActive", True)
-        })
+        if(p.get("isActive")):
+            product_data.append({
+                "productID": str(p["_id"]),
+                "name": p["name"],
+                "price": p["price"],
+                "category": p["category"],
+                "description": p.get("description", ""),
+                "images": p.get("images", "Not Found"),
+                "stock" : p.get("stock", "0"),
+                "rating" : p.get("rating", "0"),
+                "reviews" : p.get("reviews", "0"),
+                "createdAt": p.get("createdAt", ""),
+                "updatedAt": p.get("updatedAt", ""),
+                "isActive": p.get("isActive", True)
+            })
 
     user_data = []
     for u in users:
@@ -188,3 +189,4 @@ def combined_recommendations(user_id, model, user_encoder, item_encoder, interac
     popular_recs = get_top_popular_purchases(user_id, df, N=E)
     combined = list(als_recs) + [item for item in popular_recs if item not in als_recs]
     return combined[:N]
+
