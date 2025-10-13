@@ -7,6 +7,11 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from bson import ObjectId
+import numpy as np
+import pandas as pd
+import datetime
+from decimal import Decimal
 
 
 from recommendation import (
@@ -26,7 +31,6 @@ app.add_middleware(
     allow_origins=[
         'http://localhost:5173',
         'http://localhost:5174',
-        'https://apnabzaar.netlify.app'
     ], 
 
     allow_credentials=True,
@@ -43,10 +47,50 @@ templates = Jinja2Templates(directory="templates")
 async def index():
     return RedirectResponse(url="/docs")
 
-# @app.post("/making_data", response_class=JSONResponse)
 def making_data_endpoint():
     df = making_data()
     return df
+
+
+def make_serializable(obj):
+    """Recursively convert obj into JSON-serializable Python primitives."""
+    # pandas DataFrame / Series
+    if isinstance(obj, pd.DataFrame):
+        return make_serializable(obj.to_dict(orient="records"))
+    if isinstance(obj, pd.Series):
+        return make_serializable(obj.tolist())
+
+    # BSON ObjectId
+    if isinstance(obj, ObjectId):
+        return str(obj)
+
+    # datetimes and dates
+    if isinstance(obj, (datetime.datetime, datetime.date, datetime.time, pd.Timestamp)):
+        # ensure timezone-aware datetimes are preserved when possible
+        try:
+            return obj.isoformat()
+        except Exception:
+            return str(obj)
+
+    # numpy scalars / arrays
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return make_serializable(obj.tolist())
+
+    # Decimal
+    if isinstance(obj, Decimal):
+        return float(obj)
+
+    # basic containers
+    if isinstance(obj, dict):
+        return {k: make_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [make_serializable(v) for v in obj]
+
+    return obj
 
 @app.post("/main", response_class=JSONResponse)
 async def main_page(request: Request):
@@ -98,9 +142,12 @@ async def recommend(req: RecommendRequest):
         recommendations = hybrid_recommendation_system(df, user_id, item_name, top_n=10)
     print(recommendations)
 
-    recs_json = recommendations.to_dict(orient="records")
+    if isinstance(recommendations, pd.DataFrame):
+        recommendations = recommendations.to_dict(orient="records")
 
-    return JSONResponse(content={"recommendations": recs_json})
+    recs_json_serializable = make_serializable(recommendations)
+
+    return JSONResponse(content={"recommendations": recs_json_serializable})
 
 
 
