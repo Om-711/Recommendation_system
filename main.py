@@ -40,6 +40,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+class RecommendRequest(BaseModel):
+    item_name: str
+    user_id: str | None = None
+
 
 # templates me html code
 templates = Jinja2Templates(directory="templates")
@@ -50,34 +54,28 @@ async def index():
     return RedirectResponse(url="/docs")
 
 def making_data_endpoint():
-    df,_ = making_data()
-    return df
+    df_product,df_user = making_data()
+    return df_product, df_user
 
-def making_user_data_endopoints():
-    _,df = making_data()
-    return df
+
 
 def make_serializable(obj):
     """Recursively convert obj into JSON-serializable Python primitives."""
-    # pandas DataFrame / Series
     if isinstance(obj, pd.DataFrame):
         return make_serializable(obj.to_dict(orient="records"))
     if isinstance(obj, pd.Series):
         return make_serializable(obj.tolist())
 
-    # BSON ObjectId
     if isinstance(obj, ObjectId):
         return str(obj)
 
-    # datetimes and dates
+
     if isinstance(obj, (datetime.datetime, datetime.date, datetime.time, pd.Timestamp)):
-        # ensure timezone-aware datetimes are preserved when possible
         try:
             return obj.isoformat()
         except Exception:
             return str(obj)
 
-    # numpy scalars / arrays
     if isinstance(obj, (np.integer,)):
         return int(obj)
     if isinstance(obj, (np.floating,)):
@@ -85,11 +83,11 @@ def make_serializable(obj):
     if isinstance(obj, np.ndarray):
         return make_serializable(obj.tolist())
 
-    # Decimal
+
     if isinstance(obj, Decimal):
         return float(obj)
 
-    # basic containers
+
     if isinstance(obj, dict):
         return {k: make_serializable(v) for k, v in obj.items()}
     if isinstance(obj, list):
@@ -111,47 +109,45 @@ async def main_page(request: Request):
     
     return JSONResponse(content={"Top_rated_products": recs})
 
-# @app.post("/als-recommend", response_class=JSONResponse)
-# async def als_recommend(user_id: int):  
+@app.post("/als-recommend", response_class=JSONResponse)
+async def als_recommend(user_id: str):  
+
+    # df1 = pd.read_csv("D:\College\SEM 5\LAB\SE\dataset\data.csv", nrows=10000)
+    df_product, df_user = making_data_endpoint()
+
+    if user_id not in df_user['user_id'].unique():
+        return JSONResponse(content={"Error": "User not Found"}, status_code=404)
     
-#     # df1 = pd.read_csv("D:\College\SEM 5\LAB\SE\dataset\data.csv", nrows=10000)
-#     df_product, df_user = making_data_endpoint()
+    model, user_encoder, item_encoder, interactions = als_recommendation(user_id)
 
-#     if user_id not in df_user['user_id'].unique():
-#         return JSONResponse(content={"Error": "User not Found"}, status_code=404)
-    
-#     model, user_encoder, item_encoder, interactions = als_recommendation(user_id)
+    recom = get_als_recommendations(user_id, model, user_encoder, item_encoder, interactions)
 
-#     recom = get_als_recommendations(user_id, model, user_encoder, item_encoder, interactions)
+    recommended_products = df_product[df_product['productID'].isin(recom)]['category'].unique()
 
-#     recommended_products = df_product[df_product['productID'].isin(recom)]['category'].unique()
+    if isinstance(recommended_products, pd.DataFrame):
+        recommended_products = recommended_products.to_dict(orient="records")
 
-#     if isinstance(recommended_products, pd.DataFrame):
-#         recommendations = recommended_products.to_dict(orient="records")
+    recs_json_serializable = make_serializable(recommended_products)
 
-#     recs_json_serializable = make_serializable(recommendations)
-
-#     return JSONResponse(content={"recommendations": recs_json_serializable})
+    return JSONResponse(content={"recommendations": recs_json_serializable})
 
 
-class RecommendRequest(BaseModel):
-    item_name: str
-    user_id: int | None = None
 
 @app.post("/recommend")
 async def recommend(req: RecommendRequest):
     item_name = req.item_name
     user_id = req.user_id
     print(f"Received item_name: {item_name}, user_id: {user_id}")
-    df = making_data_endpoint()
-    
-    corrected_item_name = get_closest_match(item_name, df['name'].tolist())
+    df_products, df_user = making_data_endpoint()
+    df = df_products
     
     if not user_id:  
-        recommendations = content_based_recommendations_improved(df, corrected_item_name, top_n=10)
+        corrected_item_name = get_closest_match(item_name, df['name'].tolist())
+        recommendations = hybrid_recommendation_system(df, user_id, corrected_item_name, top_n=10)
         # recommendations = content_based_recommendations(df, corrected_item_name, top_n=10)
     else:
-        recommendations = hybrid_recommendation_system(df, user_id, item_name, top_n=10)
+        corrected_item_name = get_closest_match(item_name, df['name'].tolist())
+        recommendations = content_based_recommendations_improved(df, corrected_item_name, top_n=10)
     print(recommendations)
 
     if isinstance(recommendations, pd.DataFrame):
