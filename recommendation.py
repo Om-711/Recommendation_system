@@ -52,16 +52,16 @@ def making_data():
             user_data.append({
                 "user_id": str(u["_id"]),
                 "productID": str(history.get("productId", "")),
-                "Event": history.get("event", {}).get("type","Not Found"),
+                "event": history.get("event", {}).get("type","Not Found"),
                 "Timestamp": history.get("time", ""),
                 "duration":history.get("duration", 0)/1000 # Convert milli-second to second betwa
             })
 
     df_products = pd.DataFrame(product_data)
-    print(df_products.head())
+    # print(df_products.head())
 
     df_user = pd.DataFrame(user_data)
-    print(df_user.head())
+    print(df_user)
 
     return df_products, df_user
 
@@ -92,22 +92,19 @@ def content_based_recommendations(df, item_name, top_n=10):
 def content_based_recommendations_improved(df, item_name, top_n=10, weights=None, 
                                            filter_same_category=False, verbose=False):
    
-    # defaults
     if weights is None:
         weights = {
-            'name': 0.40,       # strong signal from exact name/title
-            'desc': 0.20,       # semantic text similarity
-            'category': 0.30,   # categorical match
-            'price': 0.10,      # price proximity
+            'name': 0.40,     
+            'desc': 0.20,     
+            'category': 0.30,  
+            'price': 0.10,     
         }
 
-    # Basic checks
     if item_name not in df['name'].values:
         if verbose:
             print(f"Item '{item_name}' not found.")
         return pd.DataFrame()
 
-    # Ensure required columns exist; create safe fallbacks
     for col in ['description', 'category', 'price', 'rating', 'reviews']:
         if col not in df.columns:
             if col == 'reviews':
@@ -117,37 +114,32 @@ def content_based_recommendations_improved(df, item_name, top_n=10, weights=None
             else:
                 df[col] = ''
 
-    # Prepare text fields
     df = df.copy()
     df['name_text'] = df['name'].fillna('').astype(str)
     df['desc_text'] = df['description'].fillna('').astype(str)
     df['category_text'] = df['category'].fillna('').astype(str)
 
-    # Vectorizers: name (with ngrams to catch short brand/model matches), desc (TF-IDF), category (tfidf or simple one-hot)
     name_vec = TfidfVectorizer(analyzer='char_wb', ngram_range=(3, 6))   # good for short product titles/brands
     desc_vec = TfidfVectorizer(stop_words='english', ngram_range=(1,2))
-    cat_vec  = TfidfVectorizer()  # category labels are short, simple TF-IDF works
+    cat_vec  = TfidfVectorizer()  
 
     name_tfidf = name_vec.fit_transform(df['name_text'])
     desc_tfidf = desc_vec.fit_transform(df['desc_text'])
     cat_tfidf  = cat_vec.fit_transform(df['category_text'])
 
-    # find query item index
     item_idx = int(df[df['name'] == item_name].index[0])
     if verbose:
         print("Found item index:", item_idx, "name:", df.at[item_idx, 'name'])
 
-    # Optionally filter candidate indices by same category
     if filter_same_category:
         target_cat = df.at[item_idx, 'category_text']
         candidate_mask = df['category_text'] == target_cat
         candidate_indices = np.where(candidate_mask)[0]
-        if len(candidate_indices) <= 1:  # nothing else in same category
+        if len(candidate_indices) <= 1:
             candidate_indices = np.arange(len(df))
     else:
         candidate_indices = np.arange(len(df))
 
-    # Compute similarities (vectorized)
     # name similarity
     name_sim = cosine_similarity(name_tfidf[item_idx], name_tfidf).ravel()[candidate_indices]
     # description similarity
@@ -163,7 +155,7 @@ def content_based_recommendations_improved(df, item_name, top_n=10, weights=None
     price_sim = 1.0 - price_dist_norm  # higher = more similar price
     price_sim = np.clip(price_sim, 0.0, 1.0)
    
-    # Combine by weighted sum (ensure weights sum to 1 or allow raw weights)
+    # Combine by weighted sum 
     total_weight = sum(weights.values())
     w = {k: v / total_weight for k, v in weights.items()}
 
@@ -228,18 +220,26 @@ def als_recommendation(user_id, user_history=None):
     }
 
     df['weight'] = df['event'].map(event_weights).fillna(0.0).astype(float)
-    user_id = 5
 
     if user_history is not None:
-        user_history['event'] = user_history['event'].astype(str).str.lower()
-        user_history['weight'] = user_history['event'].map(event_weights).fillna(0.0).astype(float)
+        uh = user_history.copy() if isinstance(user_history, pd.DataFrame) else pd.DataFrame(user_history)
+        uh['event'] = uh['event'].astype(str).str.lower()
+        uh['weight'] = uh['event'].map(event_weights).fillna(0.0).astype(float)
+        
+        if 'duration' in uh.columns:
+            uh['weight'] = uh['weight'] + np.log1p(uh['duration'].fillna(0.0)) * 0.1
+        df = pd.concat([df, uh], ignore_index=True)
 
+    
     if user_id not in df['user_id'].unique():
         df = pd.concat([df, user_history], ignore_index=True)
         df['event'] = df['event'].astype(str).str.lower()
         df['weight'] = df['event'].map(event_weights).fillna(0.0).astype(float)
 
     agg = df.groupby(['user_id', 'productID'])['weight'].sum().reset_index()
+    agg['user_id'] = agg['user_id'].astype(str)
+    agg['productID'] = agg['productID'].astype(str)
+
     user_encoder = LabelEncoder()
     item_encoder = LabelEncoder()
     user_encoder.fit(agg['user_id'])
@@ -281,11 +281,16 @@ def get_als_recommendations(user_id, model, user_encoder, item_encoder, interact
 
     if items.size == 0:
         return []
+    
     return item_encoder.inverse_transform(items.astype(int))
 
 def combined_recommendations(user_id, model, user_encoder, item_encoder, interactions, df, N=10):
-    half = N // 2
+
+    half = max(1, N // 2)
     als_recs = get_als_recommendations(user_id, model, user_encoder, item_encoder, interactions, N=half)
-    popular_recs = get_top_popular_purchases(user_id, df, N=E)
+
+    popular_recs = get_top_popular_purchases(user_id, df, N=N)
+
     combined = list(als_recs) + [item for item in popular_recs if item not in als_recs]
+
     return combined[:N]
