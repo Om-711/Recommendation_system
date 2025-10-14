@@ -141,13 +141,13 @@ async def recommend(req: RecommendRequest):
     df_products, df_user = making_data_endpoint()
     df = df_products
     
-    if not user_id:  
-        corrected_item_name = get_closest_match(item_name, df['name'].tolist())
-        recommendations = hybrid_recommendation_system(df, user_id, corrected_item_name, top_n=10)
-        # recommendations = content_based_recommendations(df, corrected_item_name, top_n=10)
-    else:
-        corrected_item_name = get_closest_match(item_name, df['name'].tolist())
-        recommendations = content_based_recommendations_improved(df, corrected_item_name, top_n=10)
+    # if not user_id:  
+    #     corrected_item_name = get_closest_match(item_name, df['name'].tolist())
+    #     recommendations = hybrid_recommendation_system(df, user_id, corrected_item_name, top_n=10)
+    #     # recommendations = content_based_recommendations(df, corrected_item_name, top_n=10)
+    # else:
+    corrected_item_name = get_closest_match(item_name, df['name'].tolist())
+    recommendations = content_based_recommendations_improved(df, corrected_item_name, top_n=10)
     print(recommendations)
 
     if isinstance(recommendations, pd.DataFrame):
