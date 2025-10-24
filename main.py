@@ -21,6 +21,7 @@ from recommendation import (
 
 app = FastAPI()
 
+# Allow cross-origin requests from frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=['http://localhost:5173', 'http://localhost:5174', 'https://apnabzaar.netlify.app'],
@@ -29,6 +30,7 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
+# Global ALS model (loaded once at startup for speed)
 als_model = None
 als_user_encoder = None
 als_item_encoder = None
@@ -36,6 +38,7 @@ als_interactions = None
 
 @app.on_event("startup")
 async def startup_event():
+    """Load ALS model when server starts"""
     global als_model, als_user_encoder, als_item_encoder, als_interactions
     try:
         _, df_user = making_data()
@@ -57,6 +60,7 @@ class UserRecommendRequest(BaseModel):
 async def index():
     return RedirectResponse(url="/docs")
 
+# Convert pandas/numpy objects to JSON-friendly format
 def to_json(obj):
     if isinstance(obj, pd.DataFrame):
         return to_json(obj.fillna(value=np.nan).replace([np.nan], [None]).to_dict(orient="records"))
@@ -87,6 +91,7 @@ def to_json(obj):
 
 @app.post("/main")
 async def main_page(request: Request):
+    """Get top rated products"""
     df_product, _ = making_data()
     top_products = rating_based_recommendation_system(df_product)
     recs = list(top_products.to_dict(orient="records") if hasattr(top_products, "to_dict") else top_products)
@@ -94,6 +99,7 @@ async def main_page(request: Request):
 
 @app.post("/als-recommend")
 async def als_recommend(user_id: str, top_n: int = 10):
+    """Get recommendations using ALS matrix factorization"""
     try:
         df_product, df_user = making_data()
         
@@ -125,6 +131,7 @@ async def als_recommend(user_id: str, top_n: int = 10):
 
 @app.post("/user-recommend")
 async def user_recommend(req: UserRecommendRequest):
+    """Get personalized recommendations based on user's purchase history"""
     try:
         df_products, df_user = making_data()
         
@@ -134,6 +141,7 @@ async def user_recommend(req: UserRecommendRequest):
                 status_code=404
             )
         
+        # Use collaborative filtering with category preference
         recommendations = collaborative_filtering_recommendations(
             df_user, df_products, req.user_id, top_n=req.top_n, category_boost=True
         )
@@ -167,6 +175,7 @@ async def user_recommend(req: UserRecommendRequest):
 
 @app.post("/recommend")
 async def recommend(req: RecommendRequest):
+    """Get recommendations for a product (hybrid: content + collaborative)"""
     try:
         df_products, df_user = making_data()
         item_name = get_closest_match(req.item_name, df_products['name'].tolist())
@@ -174,6 +183,7 @@ async def recommend(req: RecommendRequest):
         if not item_name:
             return JSONResponse(content={"error": "Product not found"}, status_code=404)
         
+        # Use hybrid if user logged in, else content-based only
         if req.user_id and req.user_id in df_user['user_id'].unique():
             recs = hybrid_recommendation_system(df_products, df_user, req.user_id, item_name, top_n=20)
         else:
