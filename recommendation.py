@@ -13,11 +13,11 @@ MONGO_URL = "mongodb+srv://arshadmansuri1825:u1AYlNbjuA5FpHbb@cluster1.2majmfd.m
 def making_data():
     client = MongoClient(MONGO_URL)
     db = client["ECommerce"]
-    
+
     products = list(db["products"].find())
     users = list(db["users"].find())
     orders = list(db["orders"].find())
-    
+
     # Extract products
     product_data = []
     for p in products:
@@ -36,13 +36,13 @@ def making_data():
                 "updatedAt": p.get("updatedAt", ""),
                 "isActive": p.get("isActive", True)
             })
-    
+
     # Extract user interactions
     user_data = []
     for u in users:
         user_id = str(u["_id"])
         
-        # Get browsing history
+        # Extract browsing history (views, add to cart)
         for h in u.get("history", []):
             event = h.get("event", {})
             event_type = event.get("type") if isinstance(event, dict) else str(event)
@@ -55,7 +55,7 @@ def making_data():
                 "duration": h.get("duration", 0) / 1000
             })
         
-        # Get purchases from orders
+        # Extract actual purchases from orders collection
         user_orders = [str(oid) for oid in u.get("orders", [])]
         for order in orders:
             if str(order.get("_id")) in user_orders:
@@ -73,6 +73,7 @@ def making_data():
     return pd.DataFrame(product_data), pd.DataFrame(user_data)
 
 
+# Map products to complementary items (e.g., bread → butter)
 def get_complementary_keywords(item_name):
     item_lower = item_name.lower()
     
@@ -100,31 +101,32 @@ def get_complementary_keywords(item_name):
     return []
 
 
+# Recommend similar products based on name, category, price, and complementary items
 def content_based_recommendations_improved(df, item_name, top_n=10, weights=None):
     if weights is None:
         weights = {'name': 0.3, 'desc': 0.15, 'category': 0.25, 'price': 0.1, 'complementary': 0.2}
-    
+
     if item_name not in df['name'].values:
         return pd.DataFrame()
-    
+
     df = df.copy()
     df['name_text'] = df['name'].fillna('').astype(str)
     df['desc_text'] = df['description'].fillna('').astype(str)
     df['category_text'] = df['category'].fillna('').astype(str)
-    
-    # TF-IDF
+
+    # Vectorize text for similarity calculation
     name_vec = TfidfVectorizer(analyzer='char_wb', ngram_range=(3, 6)).fit_transform(df['name_text'])
     desc_vec = TfidfVectorizer(stop_words='english', ngram_range=(1, 2)).fit_transform(df['desc_text'])
     cat_vec = TfidfVectorizer().fit_transform(df['category_text'])
     
     idx = int(df[df['name'] == item_name].index[0])
     
-    # Calculate similarities
+    # Find products similar in name, description, category
     name_sim = cosine_similarity(name_vec[idx], name_vec).ravel()
     desc_sim = cosine_similarity(desc_vec[idx], desc_vec).ravel()
     cat_sim = cosine_similarity(cat_vec[idx], cat_vec).ravel()
     
-    # Price similarity
+    # Compare price ranges
     prices = df['price'].fillna(0).astype(float).values
     price_range = prices.max() - prices.min() + 1e-9
     price_sim = 1.0 - np.clip(np.abs(prices - prices[idx]) / price_range, 0, 1)
@@ -137,7 +139,7 @@ def content_based_recommendations_improved(df, item_name, top_n=10, weights=None
     ])
     if comp_sim.max() > 0:
         comp_sim = comp_sim / comp_sim.max()
-    
+
     # Combine scores
     total_w = sum(weights.values())
     w = {k: v / total_w for k, v in weights.items()}
@@ -149,17 +151,19 @@ def content_based_recommendations_improved(df, item_name, top_n=10, weights=None
         w['price'] * price_sim +
         w['complementary'] * comp_sim
     )
-    
+
     df['score'] = final_score
     return df[df['name'] != item_name].sort_values('score', ascending=False).head(top_n)
 
 
+# Recommend based on what similar users liked
 def collaborative_filtering_recommendations(df_user, df_product, user_id, top_n=10, category_boost=True):
     if category_boost:
         return collaborative_filtering_category_aware(df_user, df_product, user_id, top_n)
     return collaborative_filtering_basic(df_user, df_product, user_id, top_n)
 
 
+# Prioritize same categories as user's purchase history (70% same category, 30% discovery)
 def collaborative_filtering_category_aware(df_user, df_product, user_id, top_n=10):
     weights = {'purchase': 10.0, 'add_to_cart': 3.0, 'cart': 3.0, 'view': 1.0}
     
@@ -167,7 +171,7 @@ def collaborative_filtering_category_aware(df_user, df_product, user_id, top_n=1
         return pd.DataFrame()
     
     try:
-        # Get user's preferred categories
+        # Find what categories user likes based on their purchase history
         user_history = df_user[df_user['user_id'] == user_id].copy()
         user_history['weight'] = user_history['event'].map(weights).fillna(0.5)
         
@@ -179,35 +183,52 @@ def collaborative_filtering_category_aware(df_user, df_product, user_id, top_n=1
             df_product[['productID', 'category']], on='productID', how='left'
         )
         
+        # Get top 3 categories user interacts with most
         cat_scores = user_with_cat.groupby('category')['weight'].sum().sort_values(ascending=False)
         preferred_cats = set(cat_scores.index[:3])
         
         # Get basic collaborative recs
         basic_recs = collaborative_filtering_basic(df_user, df_product, user_id, top_n * 3)
         
-        if basic_recs.empty:
-            return pd.DataFrame()
-        
-        # Split by category
+        # Separate recommendations into same vs different categories
         same_cat = basic_recs[basic_recs['category'].isin(preferred_cats)]
         other_cat = basic_recs[~basic_recs['category'].isin(preferred_cats)]
         
-        # Combine 70/30
+        # Calculate how many we need from each
         same_count = int(top_n * 0.7)
         other_count = top_n - same_count
         
+        # If not enough from preferred categories, fill with popular items from those categories
+        if len(same_cat) < same_count:
+            # Get products user hasn't interacted with from preferred categories
+            user_product_ids = set(user_history['productID'].unique())
+            category_products = df_product[
+                (df_product['category'].isin(preferred_cats)) &
+                (~df_product['productID'].isin(user_product_ids))
+            ].copy()
+            
+            # Sort by rating to get popular items
+            category_products = category_products.sort_values('rating', ascending=False)
+            
+            # Fill the gap
+            needed = same_count - len(same_cat)
+            filler = category_products[~category_products['productID'].isin(same_cat['productID'])].head(needed)
+            same_cat = pd.concat([same_cat, filler])
+        
+        # Combine results
         result = pd.concat([
             same_cat.head(same_count),
             other_cat.head(other_count)
         ]).drop_duplicates(subset=['productID']).head(top_n)
         
         return result.reset_index(drop=True)
-    
+        
     except Exception as e:
         print(f"Collaborative filtering error: {e}")
         return pd.DataFrame()
 
 
+# Find similar users and recommend what they liked
 def collaborative_filtering_basic(df_user, df_product, user_id, top_n=10):
     weights = {'purchase': 10.0, 'add_to_cart': 3.0, 'cart': 3.0, 'view': 1.0}
     
@@ -218,6 +239,7 @@ def collaborative_filtering_basic(df_user, df_product, user_id, top_n=10):
         df_clean = df_user[df_user['productID'].notna() & (df_user['productID'] != '')].copy()
         df_clean['weight'] = df_clean['event'].map(weights).fillna(0.5)
         
+        # Create user-product matrix
         user_item = df_clean.pivot_table(
             index='user_id', columns='productID', values='weight', aggfunc='sum'
         ).fillna(0)
@@ -230,6 +252,7 @@ def collaborative_filtering_basic(df_user, df_product, user_id, top_n=10):
             index=user_item.index, columns=user_item.columns
         )
         
+        # Find users with similar purchase patterns
         similarity = cosine_similarity(matrix_norm)
         target_idx = matrix_norm.index.get_loc(user_id)
         similar_users = similarity[target_idx].argsort()[::-1][1:11]
@@ -257,12 +280,13 @@ def collaborative_filtering_basic(df_user, df_product, user_id, top_n=10):
                 result.append(product.iloc[0])
         
         return pd.DataFrame(result).reset_index(drop=True) if result else pd.DataFrame()
-    
+        
     except Exception as e:
         print(f"Error: {e}")
         return pd.DataFrame()
 
 
+# Mix content-based and collaborative filtering (70% content, 30% collaborative)
 def hybrid_recommendation_system(df_product, df_user, user_id, item_name, top_n=20):
     try:
         content_recs = content_based_recommendations_improved(df_product, item_name, top_n * 2)
@@ -292,17 +316,37 @@ def hybrid_recommendation_system(df_product, df_user, user_id, item_name, top_n=
         return content_based_recommendations_improved(df_product, item_name, top_n)
 
 
+# Get top rated products
 def rating_based_recommendation_system(df):
-    group_cols = [col for col in df.columns if col != 'rating']
-    grouped = df.groupby(group_cols)['rating'].mean().reset_index()
-    return grouped.sort_values(by='rating', ascending=False).head(10)
+    try:
+        # Exclude columns with unhashable types (like lists)
+        hashable_cols = []
+        for col in df.columns:
+            if col != 'rating':
+                try:
+                    df[col].apply(hash)
+                    hashable_cols.append(col)
+                except TypeError:
+                    pass
+        
+        if not hashable_cols:
+            # Fallback: just sort by rating
+            return df.sort_values(by='rating', ascending=False).head(10)
+        
+        grouped = df.groupby(hashable_cols)['rating'].mean().reset_index()
+        return grouped.sort_values(by='rating', ascending=False).head(10)
+    except Exception as e:
+        print(f"Rating-based error: {e}")
+        return df.sort_values(by='rating', ascending=False).head(10)
 
 
+# Fuzzy match product names (handles typos)
 def get_closest_match(user_input, all_names):
     match, score = process.extractOne(user_input, all_names)
     return match if score > 60 else None
 
 
+# Train ALS (matrix factorization) model for recommendations
 def train_als_model(df_user=None):
     if df_user is None:
         _, df_user = making_data()
@@ -315,14 +359,14 @@ def train_als_model(df_user=None):
     
     if df.empty:
         return None, None, None, None
-    
+
     weights = {'view': 1.0, 'cart': 3.0, 'add_to_cart': 3.0, 'purchase': 10.0}
     df['weight'] = df['event'].map(weights).fillna(0.0)
-    
+
     agg = df.groupby(['user_id', 'productID'])['weight'].sum().reset_index()
     agg['user_id'] = agg['user_id'].astype(str)
     agg['productID'] = agg['productID'].astype(str)
-    
+
     user_enc = LabelEncoder()
     item_enc = LabelEncoder()
     agg['user_idx'] = user_enc.fit_transform(agg['user_id'])
@@ -333,49 +377,49 @@ def train_als_model(df_user=None):
         shape=(len(user_enc.classes_), len(item_enc.classes_))
     ).tocsr()
     
-    item_user_csr = user_item_csr.T.tocsr()
+    # Train on user_item matrix (users x items) so factors match correctly
     model = AlternatingLeastSquares(factors=20, regularization=0.1, iterations=30, random_state=42)
-    model.fit(item_user_csr)
+    model.fit(user_item_csr.T.tocsr())  # ALS fit needs item_user, but we'll use direct scoring
     
-    return model, user_enc, item_enc, item_user_csr
+    # Return user_item for easier use
+    return model, user_enc, item_enc, user_item_csr
 
 
+# Get recommendations using trained ALS model with direct scoring
 def get_als_recommendations(user_id, model, user_enc, item_enc, interactions, N=10):
     if model is None or user_enc is None or user_id not in user_enc.classes_:
         return []
-    
+        
     try:
         user_idx = int(user_enc.transform([user_id])[0])
-        user_items = interactions[:, user_idx]
         
-        if user_items.nnz >= len(item_enc.classes_):
+        # Get user's already interacted items
+        user_row = interactions[user_idx].toarray().flatten()
+        already_liked = set(np.where(user_row > 0)[0])
+        
+        # Check if user has interacted with all items
+        if len(already_liked) >= len(item_enc.classes_):
             return []
         
-        recommended = model.recommend(
-            userid=user_idx,
-            user_items=user_items,
-            N=min(N, len(item_enc.classes_) - user_items.nnz),
-            filter_already_liked_items=True
-        )
+        # Direct scoring: user_factor @ item_factors.T
+        # Since model was trained on item_user (items x users):
+        # - model.user_factors actually contains item factors (one per row/item)
+        # - model.item_factors actually contains user factors (one per column/user)
+        user_factor = model.item_factors[user_idx]  # Get this user's factor
+        item_factors = model.user_factors  # These are actually item factors
         
-        if isinstance(recommended, tuple) and len(recommended) == 2:
-            item_indices = np.asarray(recommended[0])
-        elif isinstance(recommended, (list, np.ndarray)):
-            item_indices = np.asarray(recommended)
-        else:
-            return []
+        # Calculate scores for all items
+        scores = item_factors.dot(user_factor)
         
-        if item_indices.size == 0:
-            return []
+        # Get top N items excluding already liked
+        item_scores = [(idx, score) for idx, score in enumerate(scores) if idx not in already_liked]
+        item_scores.sort(key=lambda x: x[1], reverse=True)
+        top_items = item_scores[:N]
         
-        valid_mask = (item_indices >= 0) & (item_indices < len(item_enc.classes_))
-        valid_indices = item_indices[valid_mask]
+        # Convert item indices to product IDs
+        item_indices = [idx for idx, _ in top_items]
+        return item_enc.inverse_transform(item_indices).tolist()
         
-        if len(valid_indices) == 0:
-            return []
-        
-        return item_enc.inverse_transform(valid_indices.astype(int)).tolist()
-    
     except Exception as e:
         print(f"ALS error: {e}")
         return []
