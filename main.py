@@ -57,6 +57,14 @@ class UserRecommendRequest(BaseModel):
     user_id: str
     top_n: int = 20
 
+class FrequentlyBoughtTogetherRequest(BaseModel):
+    product_id: str
+    top_n: int = 6
+
+class ALSRecommendRequest(BaseModel):
+    user_id: str
+    top_n: int = 10
+
 @app.get("/")
 async def index():
     return RedirectResponse(url="/docs")
@@ -99,22 +107,22 @@ async def main_page(request: Request):
     return JSONResponse(content={"Top_rated_products": recs})
 
 @app.post("/als-recommend")
-async def als_recommend(user_id: str, top_n: int = 10):
+async def als_recommend(req: ALSRecommendRequest):
     """Get recommendations using ALS matrix factorization"""
     try:
         df_product, df_user = making_data()
         
-        if als_model is None or user_id not in df_user['user_id'].unique():
-            top_products = df_product.sort_values('rating', ascending=False).head(top_n)
+        if als_model is None or req.user_id not in df_user['user_id'].unique():
+            top_products = df_product.sort_values('rating', ascending=False).head(req.top_n)
             return JSONResponse(content={
                 "recommendations": to_json(top_products.to_dict(orient="records")),
                 "method": "fallback_popular"
             })
         
-        product_ids = get_als_recommendations(user_id, als_model, als_user_encoder, als_item_encoder, als_interactions, N=top_n)
+        product_ids = get_als_recommendations(req.user_id, als_model, als_user_encoder, als_item_encoder, als_interactions, N=req.top_n)
         
         if not product_ids:
-            top_products = df_product.sort_values('rating', ascending=False).head(top_n)
+            top_products = df_product.sort_values('rating', ascending=False).head(req.top_n)
             return JSONResponse(content={
                 "recommendations": to_json(top_products.to_dict(orient="records")),
                 "method": "fallback_popular"
@@ -198,32 +206,28 @@ async def recommend(req: RecommendRequest):
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
-@app.get("/frequently-bought-together")
-async def frequently_bought_together(product_id: str, top_n: int = 6):
+@app.post("/frequently-bought-together")
+async def frequently_bought_together(req: FrequentlyBoughtTogetherRequest):
     """
     Get products frequently bought together with the given product.
     This uses Association Rule Mining (Apriori algorithm) to find products 
     that are commonly purchased together in the same order.
-    
-    Query Parameters:
-        product_id: The product ID to find associations for
-        top_n: Number of recommendations to return (default: 6)
     """
     try:
         df_products, _ = making_data()
         
         # Check if product exists
-        if product_id not in df_products['productID'].values:
+        if req.product_id not in df_products['productID'].values:
             return JSONResponse(
-                content={"error": "Product not found", "product_id": product_id},
+                content={"error": "Product not found", "product_id": req.product_id},
                 status_code=404
             )
         
         # Get frequently bought together products
         recommendations = get_frequently_bought_together(
-            product_id, 
+            req.product_id, 
             df_products, 
-            top_n=top_n
+            top_n=req.top_n
         )
         
         if recommendations.empty:
@@ -245,6 +249,6 @@ async def frequently_bought_together(product_id: str, top_n: int = 6):
     
     except Exception as e:
         return JSONResponse(
-            content={"error": str(e), "product_id": product_id}, 
+            content={"error": str(e), "product_id": req.product_id}, 
             status_code=500
         )
