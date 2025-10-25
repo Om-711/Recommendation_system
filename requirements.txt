@@ -8,6 +8,5 @@ scipy
 python-dotenv
 pymongo
 python-multipart
+mlxtend
 implicit
-jinja2
-pymysql
