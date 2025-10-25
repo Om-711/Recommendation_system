@@ -1,13 +1,18 @@
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse, RedirectResponse
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi import FastAPI, Form, Request
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
 import pandas as pd
-import numpy as np
+from starlette.responses import RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from bson import ObjectId
-from decimal import Decimal
+import numpy as np
+import pandas as pd
 import datetime
-from datetime import datetime as dt, timedelta
+from decimal import Decimal
+
 
 from recommendation import (
     hybrid_recommendation_system,
@@ -18,280 +23,352 @@ from recommendation import (
     making_data,
     content_based_recommendations_improved,
     collaborative_filtering_recommendations,
-    get_frequently_bought_together
+    collaborative_filtering_category_aware
 )
 
 app = FastAPI()
 
-# CORS setup for frontend access
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=['http://localhost:5173', 'http://localhost:5174', 'https://apnabzaar.netlify.app'],
+    allow_origins=[
+        'http://localhost:5173',
+        'http://localhost:5174',
+        'https://apnabzaar.netlify.app'
+    ], 
+
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"]
+    allow_headers=["*"],
 )
 
-# Global cache for data (refreshed periodically)
-cached_products = None
-cached_users = None
-cache_timestamp = None
-CACHE_DURATION = timedelta(minutes=5)  # Refresh every 5 minutes
-
-# Global ALS model (loaded at startup)
+# Global variables for pretrained ALS model
 als_model = None
 als_user_encoder = None
 als_item_encoder = None
 als_interactions = None
 
-def get_cached_data():
-    """Get cached data or refresh if expired"""
-    global cached_products, cached_users, cache_timestamp
-    
-    # Check if cache needs refresh
-    if (cached_products is None or cached_users is None or 
-        cache_timestamp is None or 
-        dt.now() - cache_timestamp > CACHE_DURATION):
-        
-        print("Refreshing data cache...")
-        cached_products, cached_users = making_data()
-        cache_timestamp = dt.now()
-        print(f"Cache updated: {len(cached_products)} products, {len(cached_users)} interactions")
-    
-    return cached_products.copy(), cached_users.copy()
-
 @app.on_event("startup")
 async def startup_event():
-    """Initialize cache and ALS model when server starts"""
+    """Train ALS model once at startup"""
     global als_model, als_user_encoder, als_item_encoder, als_interactions
+    print("\n" + "="*80)
+    print("INITIALIZING ALS MODEL AT STARTUP")
+    print("="*80)
     try:
-        # Load initial cache
-        print("Loading initial data cache...")
-        df_products, df_user = get_cached_data()
-        
-        # Train ALS model
+        _, df_user = making_data()
         als_model, als_user_encoder, als_item_encoder, als_interactions = train_als_model(df_user)
-        print("ALS model loaded" if als_model else "✗ ALS model unavailable")
-        print(" Server ready!")
+        if als_model is not None:
+            print("✓ ALS model loaded and ready")
+        else:
+            print("⚠ ALS model could not be trained (insufficient data)")
     except Exception as e:
-        print(f"Startup error: {e}")
+        print(f"⚠ Error training ALS model: {e}")
+        import traceback
+        traceback.print_exc()
+    print("="*80 + "\n")
 
-# Request models
 class RecommendRequest(BaseModel):
     item_name: str
     user_id: str | None = None
-    top_n: int = 20
+    top_n: int = 20  # Number of recommendations to return (default: 20)
 
 class UserRecommendRequest(BaseModel):
     user_id: str
-    top_n: int = 20
+    top_n: int = 20  # Number of recommendations to return (default: 20)
 
-class FrequentlyBoughtTogetherRequest(BaseModel):
-    product_id: str
-    top_n: int = 6
 
-class ALSRecommendRequest(BaseModel):
-    user_id: str
-    top_n: int = 10
+# templates me html code
+templates = Jinja2Templates(directory="templates")
 
-@app.get("/")
+
+@app.get("/", tags=["default"])
 async def index():
-    """Redirect to API docs"""
     return RedirectResponse(url="/docs")
 
-# JSON converter for pandas/numpy types
-def to_json(obj):
-    """Convert DataFrames and numpy types to JSON-safe format"""
+def making_data_endpoint():
+    df_product,df_user = making_data()
+    return df_product, df_user
+
+
+def make_serializable(obj):
+    """Recursively convert obj into JSON-serializable Python primitives."""
     if isinstance(obj, pd.DataFrame):
-        return to_json(obj.fillna(value=np.nan).replace([np.nan], [None]).to_dict(orient="records"))
+        # Replace NaN values with None before converting
+        return make_serializable(obj.fillna(value=np.nan).replace([np.nan], [None]).to_dict(orient="records"))
     if isinstance(obj, pd.Series):
-        return to_json(obj.tolist())
+        return make_serializable(obj.tolist())
+
     if isinstance(obj, ObjectId):
         return str(obj)
+
     if isinstance(obj, (datetime.datetime, datetime.date, datetime.time, pd.Timestamp)):
         try:
             return obj.isoformat()
-        except:
+        except Exception:
             return str(obj)
-    if isinstance(obj, np.integer):
+
+    if isinstance(obj, (np.integer,)):
         return int(obj)
-    if isinstance(obj, np.floating):
-        return None if (np.isnan(obj) or np.isinf(obj)) else float(obj)
+    if isinstance(obj, (np.floating,)):
+        # Handle NaN and inf values
+        if np.isnan(obj) or np.isinf(obj):
+            return None
+        return float(obj)
     if isinstance(obj, np.ndarray):
-        return to_json(obj.tolist())
+        return make_serializable(obj.tolist())
+
     if isinstance(obj, Decimal):
         return float(obj)
+    
+    # Handle Python float NaN/inf
     if isinstance(obj, float):
-        return None if (np.isnan(obj) or np.isinf(obj)) else obj
+        if np.isnan(obj) or np.isinf(obj):
+            return None
+        return obj
+
     if isinstance(obj, dict):
-        return {k: to_json(v) for k, v in obj.items()}
+        return {k: make_serializable(v) for k, v in obj.items()}
     if isinstance(obj, list):
-        return [to_json(v) for v in obj]
+        return [make_serializable(v) for v in obj]
+
     return obj
 
-@app.post("/main")
-async def main_page():
-    """Get top-rated products for homepage"""
-    df_product, _ = get_cached_data()
-    top_products = rating_based_recommendation_system(df_product)
-    return JSONResponse(content={
-        "Top_rated_products": to_json(top_products.to_dict(orient="records"))
-    })
 
-@app.post("/als-recommend")
-async def als_recommend(req: ALSRecommendRequest):
-    """Get ALS matrix factorization recommendations"""
+@app.post("/main", response_class=JSONResponse)
+async def main_page(request: Request):
+    df = making_data_endpoint()
+    top_products = rating_based_recommendation_system(df)
+
+    if hasattr(top_products, "to_dict"):
+        recs = top_products.to_dict(orient="records")
+    else:
+        recs = top_products  
+
+    recs = list(recs)
+    
+    return JSONResponse(content={"Top_rated_products": recs})
+
+@app.post("/als-recommend", response_class=JSONResponse)
+async def als_recommend(user_id: str, top_n: int = 10):  
+    """
+    Get ALS-based recommendations for a user.
+    Uses pretrained model loaded at startup for fast responses.
+    """
     try:
-        df_product, df_user = get_cached_data()
+        print(f"\nALS Recommendation request for user: {user_id}, top_n: {top_n}")
         
-        # Check if ALS can be used
-        if als_model is None or req.user_id not in df_user['user_id'].unique():
-            fallback = df_product.sort_values('rating', ascending=False).head(req.top_n)
-            return JSONResponse(content={
-                "recommendations": to_json(fallback.to_dict(orient="records")),
-                "method": "fallback_popular"
-            })
+        # Check if model is available
+        if als_model is None:
+            print("⚠ ALS model not available, falling back to popular items")
+            df_product, df_user = making_data_endpoint()
+            # Return top rated products as fallback
+            top_products = df_product.sort_values('rating', ascending=False).head(top_n)
+            recs = make_serializable(top_products.to_dict(orient="records"))
+            return JSONResponse(content={"recommendations": recs, "method": "fallback_popular"})
         
-        # Get ALS recommendations
-        product_ids = get_als_recommendations(
-            req.user_id, als_model, als_user_encoder, 
-            als_item_encoder, als_interactions, N=req.top_n
+        df_product, df_user = making_data_endpoint()
+
+        # Validate user exists
+        if user_id not in df_user['user_id'].unique():
+            return JSONResponse(
+                content={"error": "User not found", "user_id": user_id}, 
+                status_code=404
+            )
+        
+        # Get ALS recommendations using pretrained model
+        recommended_product_ids = get_als_recommendations(
+            user_id, 
+            als_model, 
+            als_user_encoder, 
+            als_item_encoder, 
+            als_interactions, 
+            N=top_n
         )
         
-        if not product_ids:
-            fallback = df_product.sort_values('rating', ascending=False).head(req.top_n)
-            return JSONResponse(content={
-                "recommendations": to_json(fallback.to_dict(orient="records")),
-                "method": "fallback_popular"
-            })
+        print(f"✓ ALS returned {len(recommended_product_ids)} product IDs")
+
+        if not recommended_product_ids:
+            print("⚠ No recommendations from ALS, returning popular items")
+            # Fallback to popular items
+            top_products = df_product.sort_values('rating', ascending=False).head(top_n)
+            recs = make_serializable(top_products.to_dict(orient="records"))
+            return JSONResponse(content={"recommendations": recs, "method": "fallback_popular"})
+
+        # Get full product details (not just categories!)
+        recommended_products = df_product[df_product['productID'].isin(recommended_product_ids)]
         
-        # Get product details
-        products = df_product[df_product['productID'].isin(product_ids)]
+        print(f"✓ Found {len(recommended_products)} product details")
+
+        # Convert to JSON-serializable format
+        recs = make_serializable(recommended_products.to_dict(orient="records"))
+
         return JSONResponse(content={
-            "recommendations": to_json(products.to_dict(orient="records")),
-            "count": len(products),
+            "recommendations": recs,
+            "count": len(recs),
             "method": "als"
         })
     
     except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+        print(f"❌ Error in ALS recommendation: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(
+            content={"error": f"An error occurred: {str(e)}"}, 
+            status_code=500
+        )
 
 @app.post("/user-recommend")
 async def user_recommend(req: UserRecommendRequest):
-    """Get personalized recommendations based on user history"""
+    """
+    Get personalized recommendations for a user based on collaborative filtering.
+    Uses user behavior patterns and similar users to recommend products.
+    """
     try:
-        df_products, df_user = get_cached_data()
+        user_id = req.user_id
+        top_n = req.top_n
         
-        # Check if user exists
-        if req.user_id not in df_user['user_id'].unique():
+        print(f"\n{'='*80}")
+        print(f"USER-BASED COLLABORATIVE FILTERING RECOMMENDATION")
+        print(f"{'='*80}")
+        print(f"User ID: {user_id}")
+        print(f"Requested: {top_n} recommendations")
+        
+        # Load data
+        df_products, df_user = making_data_endpoint()
+        
+        # Validate user exists
+        if user_id not in df_user['user_id'].unique():
+            print(f"❌ User {user_id} not found in database")
             return JSONResponse(
-                content={"error": "User not found", "user_id": req.user_id},
+                content={
+                    "error": "User not found",
+                    "user_id": user_id,
+                    "message": "This user has no interaction history in our system."
+                }, 
                 status_code=404
             )
         
-        # Get collaborative filtering recommendations
+        # Get user's interaction stats
+        user_interactions = df_user[df_user['user_id'] == user_id]
+        print(f"✓ User has {len(user_interactions)} interactions")
+        print(f"  Event breakdown: {user_interactions['event'].value_counts().to_dict()}")
+        
+        # Get collaborative filtering recommendations (category-aware by default)
         recommendations = collaborative_filtering_recommendations(
-            df_user, df_products, req.user_id, top_n=req.top_n, category_boost=True
+            df_user, 
+            df_products, 
+            user_id, 
+            top_n=top_n,
+            category_boost=True  # Prioritize same categories as user's history
         )
         
-        if recommendations.empty:
-            # Fallback: popular products user hasn't bought
-            user_products = df_user[df_user['user_id'] == req.user_id]['productID'].unique()
-            available = df_products[~df_products['productID'].isin(user_products)]
-            fallback = available[available['stock'] > 0].sort_values(
-                by=['rating', 'reviews'], ascending=[False, False]
-            ).head(req.top_n)
+        print(f"\n{'='*80}")
+        print(f"RESULT")
+        print(f"{'='*80}")
+        
+        # Handle empty recommendations
+        if recommendations.empty or len(recommendations) == 0:
+            print("⚠ No collaborative recommendations available")
+            print("  Falling back to popular/top-rated products")
             
-            if fallback.empty:
-                fallback = df_products.sort_values(
-                    by=['rating', 'reviews'], ascending=[False, False]
-                ).head(req.top_n)
+            # Fallback: Return top-rated products that user hasn't interacted with
+            user_product_ids = df_user[df_user['user_id'] == user_id]['productID'].unique()
+            available_products = df_products[~df_products['productID'].isin(user_product_ids)]
+            
+            # Sort by rating and stock availability
+            fallback_recs = available_products[available_products['stock'] > 0].sort_values(
+                by=['rating', 'reviews'], 
+                ascending=[False, False]
+            ).head(top_n)
+            
+            if len(fallback_recs) == 0:
+                # Last resort: just return top products
+                fallback_recs = df_products.sort_values(
+                    by=['rating', 'reviews'], 
+                    ascending=[False, False]
+                ).head(top_n)
+            
+            recs = make_serializable(fallback_recs.to_dict(orient="records"))
+            print(f"✓ Returned {len(recs)} fallback recommendations")
             
             return JSONResponse(content={
-                "recommendations": to_json(fallback.to_dict(orient="records")),
-                "count": len(fallback),
-                "method": "fallback_popular"
+                "recommendations": recs,
+                "count": len(recs),
+                "method": "fallback_popular",
+                "message": "Showing popular products (insufficient user similarity data)"
             })
         
+        # Convert recommendations to JSON-serializable format
+        recs = make_serializable(recommendations.to_dict(orient="records"))
+        
+        print(f"✓ Successfully generated {len(recs)} recommendations")
+        print(f"{'='*80}\n")
+        
         return JSONResponse(content={
-            "recommendations": to_json(recommendations.to_dict(orient="records")),
-            "count": len(recommendations),
-            "method": "collaborative_filtering"
+            "recommendations": recs,
+            "count": len(recs),
+            "method": "collaborative_filtering",
+            "message": f"Personalized recommendations based on users with similar preferences"
         })
     
     except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+        print(f"\n❌ Error in user recommendation: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        print(f"{'='*80}\n")
+        
+        return JSONResponse(
+            content={
+                "error": "Internal server error",
+                "message": f"An error occurred while generating recommendations: {str(e)}"
+            }, 
+            status_code=500
+        )
+
 
 @app.post("/recommend")
 async def recommend(req: RecommendRequest):
-    """Get product recommendations (hybrid or content-based)"""
     try:
-        df_products, df_user = get_cached_data()
+        item_name = req.item_name
+        user_id = req.user_id
+        top_n = 10
+        print(f"Received item_name: {item_name}, user_id: {user_id}, top_n: {top_n}")
+        df_products, df_user = making_data_endpoint()
+        df = df_products
         
-        # Find closest matching product
-        item_name = get_closest_match(req.item_name, df_products['name'].tolist())
-        
-        if not item_name:
-            return JSONResponse(
-                content={"error": "Product not found"}, 
-                status_code=404
-            )
-        
-        # Use hybrid if user is logged in, otherwise content-based
-        if req.user_id and req.user_id in df_user['user_id'].unique():
-            recs = hybrid_recommendation_system(
-                df_products, df_user, req.user_id, item_name, top_n=req.top_n
-            )
+        if user_id:  
+            corrected_item_name = get_closest_match(item_name, df['name'].tolist())
+            print(f"Corrected item name: {corrected_item_name}")
+            
+            # Check if user exists in df_user
+            if user_id not in df_user['user_id'].unique():
+                print(f"Warning: User {user_id} not found in user data. Using content-based recommendations instead.")
+                recommendations = content_based_recommendations_improved(df, corrected_item_name, top_n=top_n)
+            else:
+                recommendations = hybrid_recommendation_system(df_products, df_user, user_id, corrected_item_name, top_n=20)
         else:
-            recs = content_based_recommendations_improved(
-                df_products, item_name, top_n=min(req.top_n, 10)
-            )
-        
-        if isinstance(recs, pd.DataFrame):
-            recs = recs.to_dict(orient="records")
-        
-        return JSONResponse(content={"recommendations": to_json(recs)})
-    
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+            print(f"No user ID provided. Using content-based recommendations.")
+            corrected_item_name = get_closest_match(item_name, df['name'].tolist())
+            recommendations = content_based_recommendations_improved(df, corrected_item_name, top_n=top_n)
+            print(recommendations)
 
-@app.post("/frequently-bought-together")
-async def frequently_bought_together(req: FrequentlyBoughtTogetherRequest):
-    """Get products frequently bought together (association rules)"""
-    try:
-        df_products, _ = get_cached_data()
-        
-        # Check if product exists
-        if req.product_id not in df_products['productID'].values:
-            return JSONResponse(
-                content={"error": "Product not found", "product_id": req.product_id},
-                status_code=404
-            )
-        
-        # Get recommendations using association rules or co-occurrence
-        recommendations = get_frequently_bought_together(
-            req.product_id, df_products, top_n=req.top_n
-        )
-        
-        if recommendations.empty:
-            return JSONResponse(content={
-                "recommendations": [],
-                "count": 0,
-                "message": "No frequently bought together items found",
-                "method": "none"
-            })
-        
-        # Check which method was used
-        method = "association_rules" if "confidence" in recommendations.columns else "co_occurrence"
-        
-        return JSONResponse(content={
-            "recommendations": to_json(recommendations.to_dict(orient="records")),
-            "count": len(recommendations),
-            "method": method
-        })
+        if isinstance(recommendations, pd.DataFrame):
+            recommendations = recommendations.to_dict(orient="records")
+
+        recs_json_serializable = make_serializable(recommendations)
+
+        return JSONResponse(content={"recommendations": recs_json_serializable})
     
     except Exception as e:
+        print(f"Error in /recommend endpoint: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return JSONResponse(
-            content={"error": str(e), "product_id": req.product_id}, 
+            content={"error": f"An error occurred: {str(e)}"}, 
             status_code=500
         )
+
+
+
+
+    
