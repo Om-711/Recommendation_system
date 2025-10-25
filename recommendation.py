@@ -1,250 +1,632 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, RedirectResponse
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 import pandas as pd
 import numpy as np
-from bson import ObjectId
-from decimal import Decimal
-import datetime
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.preprocessing import normalize, LabelEncoder
+from fuzzywuzzy import process
+from scipy.sparse import coo_matrix
+from implicit.als import AlternatingLeastSquares
+from pymongo import MongoClient
+from collections import defaultdict, Counter
 
-from recommendation import (
-    hybrid_recommendation_system,
-    rating_based_recommendation_system,
-    get_closest_match,
-    train_als_model,
-    get_als_recommendations,
-    making_data,
-    content_based_recommendations_improved,
-    collaborative_filtering_recommendations,
-    get_frequently_bought_together
-)
+# Optional import for association rule mining
+try:
+    from mlxtend.frequent_patterns import apriori, association_rules
+    MLXTEND_AVAILABLE = True
+except ImportError:
+    MLXTEND_AVAILABLE = False
+    print("Warning: mlxtend not installed. Frequently bought together will use fallback method.")
+    print("Install with: pip install mlxtend")
 
-app = FastAPI()
+MONGO_URL = "mongodb+srv://arshadmansuri1825:u1AYlNbjuA5FpHbb@cluster1.2majmfd.mongodb.net/ECommerce"
 
-# Allow cross-origin requests from frontend
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=['http://localhost:5173', 'http://localhost:5174', 'https://apnabzaar.netlify.app'],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"]
-)
+def making_data():
+    client = MongoClient(MONGO_URL)
+    db = client["ECommerce"]
 
-# Global ALS model (loaded once at startup for speed)
-als_model = None
-als_user_encoder = None
-als_item_encoder = None
-als_interactions = None
+    products = list(db["products"].find())
+    users = list(db["users"].find())
+    orders = list(db["orders"].find())
 
-@app.on_event("startup")
-async def startup_event():
-    """Load ALS model when server starts"""
-    global als_model, als_user_encoder, als_item_encoder, als_interactions
-    try:
-        _, df_user = making_data()
-        als_model, als_user_encoder, als_item_encoder, als_interactions = train_als_model(df_user)
-        print("ALS model initialized" if als_model else "ALS model unavailable")
-    except Exception as e:
-        print(f"ALS init error: {e}")
+    # Extract products
+    product_data = []
+    for p in products:
+        if p.get("isActive"):
+            product_data.append({
+                "productID": str(p["_id"]),
+                "name": p["name"],
+                "price": p["price"],
+                "category": p["category"],
+                "description": p.get("description", ""),
+                "images": p.get("images", ""),
+                "stock": p.get("stock", "0"),
+                "rating": p.get("rating", "0"),
+                "reviews": p.get("reviews", "0"),
+                "createdAt": p.get("createdAt", ""),
+                "updatedAt": p.get("updatedAt", ""),
+                "isActive": p.get("isActive", True)
+            })
 
-class RecommendRequest(BaseModel):
-    item_name: str
-    user_id: str | None = None
-    top_n: int = 20
-
-class UserRecommendRequest(BaseModel):
-    user_id: str
-    top_n: int = 20
-
-@app.get("/")
-async def index():
-    return RedirectResponse(url="/docs")
-
-# Convert pandas/numpy objects to JSON-friendly format
-def to_json(obj):
-    if isinstance(obj, pd.DataFrame):
-        return to_json(obj.fillna(value=np.nan).replace([np.nan], [None]).to_dict(orient="records"))
-    if isinstance(obj, pd.Series):
-        return to_json(obj.tolist())
-    if isinstance(obj, ObjectId):
-        return str(obj)
-    if isinstance(obj, (datetime.datetime, datetime.date, datetime.time, pd.Timestamp)):
-        try:
-            return obj.isoformat()
-        except:
-            return str(obj)
-    if isinstance(obj, np.integer):
-        return int(obj)
-    if isinstance(obj, np.floating):
-        return None if (np.isnan(obj) or np.isinf(obj)) else float(obj)
-    if isinstance(obj, np.ndarray):
-        return to_json(obj.tolist())
-    if isinstance(obj, Decimal):
-        return float(obj)
-    if isinstance(obj, float):
-        return None if (np.isnan(obj) or np.isinf(obj)) else obj
-    if isinstance(obj, dict):
-        return {k: to_json(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [to_json(v) for v in obj]
-    return obj
-
-@app.post("/main")
-async def main_page(request: Request):
-    """Get top rated products"""
-    df_product, _ = making_data()
-    top_products = rating_based_recommendation_system(df_product)
-    recs = list(top_products.to_dict(orient="records") if hasattr(top_products, "to_dict") else top_products)
-    return JSONResponse(content={"Top_rated_products": recs})
-
-@app.post("/als-recommend")
-async def als_recommend(user_id: str, top_n: int = 10):
-    """Get recommendations using ALS matrix factorization"""
-    try:
-        df_product, df_user = making_data()
+    # Extract user interactions
+    user_data = []
+    for u in users:
+        user_id = str(u["_id"])
         
-        if als_model is None or user_id not in df_user['user_id'].unique():
-            top_products = df_product.sort_values('rating', ascending=False).head(top_n)
-            return JSONResponse(content={
-                "recommendations": to_json(top_products.to_dict(orient="records")),
-                "method": "fallback_popular"
+        # Extract browsing history (views, add to cart)
+        for h in u.get("history", []):
+            event = h.get("event", {})
+            event_type = event.get("type") if isinstance(event, dict) else str(event)
+            
+            user_data.append({
+                "user_id": user_id,
+                "productID": str(h.get("productID", "")),
+                "event": event_type or "view",
+                "Timestamp": h.get("time", ""),
+                "duration": h.get("duration", 0) / 1000
             })
         
-        product_ids = get_als_recommendations(user_id, als_model, als_user_encoder, als_item_encoder, als_interactions, N=top_n)
-        
-        if not product_ids:
-            top_products = df_product.sort_values('rating', ascending=False).head(top_n)
-            return JSONResponse(content={
-                "recommendations": to_json(top_products.to_dict(orient="records")),
-                "method": "fallback_popular"
-            })
-        
-        products = df_product[df_product['productID'].isin(product_ids)]
-        return JSONResponse(content={
-            "recommendations": to_json(products.to_dict(orient="records")),
-            "count": len(products),
-            "method": "als"
-        })
+        # Extract actual purchases from orders collection
+        user_orders = [str(oid) for oid in u.get("orders", [])]
+        for order in orders:
+            if str(order.get("_id")) in user_orders:
+                for item in order.get("items", []):
+                    product_id = str(item.get("product", ""))
+                    if product_id:
+                        user_data.append({
+                            "user_id": user_id,
+                            "productID": product_id,
+                            "event": "purchase",
+                            "Timestamp": order.get("createdAt", ""),
+                            "duration": 0
+                        })
     
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+    return pd.DataFrame(product_data), pd.DataFrame(user_data)
 
-@app.post("/user-recommend")
-async def user_recommend(req: UserRecommendRequest):
-    """Get personalized recommendations based on user's purchase history"""
+
+# Map products to complementary items (e.g., bread → butter)
+def get_complementary_keywords(item_name):
+    item_lower = item_name.lower()
+    
+    complements = {
+        'butter': ['bread', 'toast', 'jam', 'cheese', 'milk'],
+        'bread': ['butter', 'jam', 'cheese', 'peanut'],
+        'milk': ['cereal', 'coffee', 'tea', 'cookies'],
+        'coffee': ['milk', 'sugar', 'cream', 'biscuit'],
+        'tea': ['milk', 'sugar', 'biscuit', 'honey'],
+        'rice': ['dal', 'lentil', 'curry', 'oil'],
+        'pasta': ['sauce', 'cheese', 'oil', 'garlic'],
+        'egg': ['bread', 'butter', 'cheese', 'milk'],
+        'cheese': ['bread', 'butter', 'cracker'],
+        'yogurt': ['honey', 'granola', 'fruit'],
+        'potato': ['onion', 'oil', 'butter'],
+        'tomato': ['onion', 'garlic', 'pasta'],
+        'oil': ['spice', 'garlic', 'onion'],
+        'sugar': ['flour', 'butter', 'milk'],
+        'flour': ['sugar', 'butter', 'egg']
+    }
+    
+    for key, items in complements.items():
+        if key in item_lower:
+            return items
+    return []
+
+
+# Recommend similar products based on name, category, price, and complementary items
+def content_based_recommendations_improved(df, item_name, top_n=10, weights=None):
+    if weights is None:
+        weights = {'name': 0.3, 'desc': 0.15, 'category': 0.25, 'price': 0.1, 'complementary': 0.2}
+
+    if item_name not in df['name'].values:
+        return pd.DataFrame()
+
+    df = df.copy()
+    df['name_text'] = df['name'].fillna('').astype(str)
+    df['desc_text'] = df['description'].fillna('').astype(str)
+    df['category_text'] = df['category'].fillna('').astype(str)
+
+    # Vectorize text for similarity calculation
+    name_vec = TfidfVectorizer(analyzer='char_wb', ngram_range=(3, 6)).fit_transform(df['name_text'])
+    desc_vec = TfidfVectorizer(stop_words='english', ngram_range=(1, 2)).fit_transform(df['desc_text'])
+    cat_vec = TfidfVectorizer().fit_transform(df['category_text'])
+    
+    idx = int(df[df['name'] == item_name].index[0])
+    
+    # Find products similar in name, description, category
+    name_sim = cosine_similarity(name_vec[idx], name_vec).ravel()
+    desc_sim = cosine_similarity(desc_vec[idx], desc_vec).ravel()
+    cat_sim = cosine_similarity(cat_vec[idx], cat_vec).ravel()
+    
+    # Compare price ranges
+    prices = df['price'].fillna(0).astype(float).values
+    price_range = prices.max() - prices.min() + 1e-9
+    price_sim = 1.0 - np.clip(np.abs(prices - prices[idx]) / price_range, 0, 1)
+    
+    # Complementary boost
+    keywords = get_complementary_keywords(item_name)
+    comp_sim = np.array([
+        sum(1.5 if kw in name.lower() else 0 for kw in keywords)
+        for name in df['name_text']
+    ])
+    if comp_sim.max() > 0:
+        comp_sim = comp_sim / comp_sim.max()
+
+    # Combine scores
+    total_w = sum(weights.values())
+    w = {k: v / total_w for k, v in weights.items()}
+    
+    final_score = (
+        w['name'] * name_sim +
+        w['desc'] * desc_sim +
+        w['category'] * cat_sim +
+        w['price'] * price_sim +
+        w['complementary'] * comp_sim
+    )
+
+    df['score'] = final_score
+    return df[df['name'] != item_name].sort_values('score', ascending=False).head(top_n)
+
+
+# Recommend based on what similar users liked
+def collaborative_filtering_recommendations(df_user, df_product, user_id, top_n=10, category_boost=True):
+    if category_boost:
+        return collaborative_filtering_category_aware(df_user, df_product, user_id, top_n)
+    return collaborative_filtering_basic(df_user, df_product, user_id, top_n)
+
+
+# Prioritize same categories as user's purchase history (70% same category, 30% discovery)
+def collaborative_filtering_category_aware(df_user, df_product, user_id, top_n=10):
+    weights = {'purchase': 10.0, 'add_to_cart': 3.0, 'cart': 3.0, 'view': 1.0}
+    
+    if df_user.empty or user_id not in df_user['user_id'].unique():
+        return pd.DataFrame()
+    
     try:
-        df_products, df_user = making_data()
+        # Find what categories user likes based on their purchase history
+        user_history = df_user[df_user['user_id'] == user_id].copy()
+        user_history['weight'] = user_history['event'].map(weights).fillna(0.5)
         
-        if req.user_id not in df_user['user_id'].unique():
-            return JSONResponse(
-                content={"error": "User not found", "user_id": req.user_id},
-                status_code=404
-            )
+        user_products = df_product[df_product['productID'].isin(user_history['productID'])]
+        if user_products.empty:
+            return pd.DataFrame()
         
-        # Use collaborative filtering with category preference
-        recommendations = collaborative_filtering_recommendations(
-            df_user, df_products, req.user_id, top_n=req.top_n, category_boost=True
+        user_with_cat = user_history.merge(
+            df_product[['productID', 'category']], on='productID', how='left'
         )
         
-        if recommendations.empty:
-            user_products = df_user[df_user['user_id'] == req.user_id]['productID'].unique()
-            available = df_products[~df_products['productID'].isin(user_products)]
-            fallback = available[available['stock'] > 0].sort_values(
-                by=['rating', 'reviews'], ascending=[False, False]
-            ).head(req.top_n)
-            
-            if fallback.empty:
-                fallback = df_products.sort_values(
-                    by=['rating', 'reviews'], ascending=[False, False]
-                ).head(req.top_n)
-            
-            return JSONResponse(content={
-                "recommendations": to_json(fallback.to_dict(orient="records")),
-                "count": len(fallback),
-                "method": "fallback_popular"
-            })
+        # Get top 3 categories user interacts with most
+        cat_scores = user_with_cat.groupby('category')['weight'].sum().sort_values(ascending=False)
+        preferred_cats = set(cat_scores.index[:3])
         
-        return JSONResponse(content={
-            "recommendations": to_json(recommendations.to_dict(orient="records")),
-            "count": len(recommendations),
-            "method": "collaborative_filtering"
-        })
-    
+        # Get basic collaborative recs
+        basic_recs = collaborative_filtering_basic(df_user, df_product, user_id, top_n * 3)
+        
+        # Separate recommendations into same vs different categories
+        same_cat = basic_recs[basic_recs['category'].isin(preferred_cats)]
+        other_cat = basic_recs[~basic_recs['category'].isin(preferred_cats)]
+        
+        # Calculate how many we need from each
+        same_count = int(top_n * 0.7)
+        other_count = top_n - same_count
+        
+        # If not enough from preferred categories, fill with popular items from those categories
+        if len(same_cat) < same_count:
+            # Get products user hasn't interacted with from preferred categories
+            user_product_ids = set(user_history['productID'].unique())
+            category_products = df_product[
+                (df_product['category'].isin(preferred_cats)) &
+                (~df_product['productID'].isin(user_product_ids))
+            ].copy()
+            
+            # Sort by rating to get popular items
+            category_products = category_products.sort_values('rating', ascending=False)
+            
+            # Fill the gap
+            needed = same_count - len(same_cat)
+            filler = category_products[~category_products['productID'].isin(same_cat['productID'])].head(needed)
+            same_cat = pd.concat([same_cat, filler])
+        
+        # Combine results
+        result = pd.concat([
+            same_cat.head(same_count),
+            other_cat.head(other_count)
+        ]).drop_duplicates(subset=['productID']).head(top_n)
+        
+        return result.reset_index(drop=True)
+        
     except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+        print(f"Collaborative filtering error: {e}")
+        return pd.DataFrame()
 
-@app.post("/recommend")
-async def recommend(req: RecommendRequest):
-    """Get recommendations for a product (hybrid: content + collaborative)"""
+
+# Find similar users and recommend what they liked
+def collaborative_filtering_basic(df_user, df_product, user_id, top_n=10):
+    weights = {'purchase': 10.0, 'add_to_cart': 3.0, 'cart': 3.0, 'view': 1.0}
+    
+    if df_user.empty or user_id not in df_user['user_id'].unique():
+        return pd.DataFrame()
+    
     try:
-        df_products, df_user = making_data()
-        item_name = get_closest_match(req.item_name, df_products['name'].tolist())
+        df_clean = df_user[df_user['productID'].notna() & (df_user['productID'] != '')].copy()
+        df_clean['weight'] = df_clean['event'].map(weights).fillna(0.5)
         
-        if not item_name:
-            return JSONResponse(content={"error": "Product not found"}, status_code=404)
+        # Create user-product matrix
+        user_item = df_clean.pivot_table(
+            index='user_id', columns='productID', values='weight', aggfunc='sum'
+        ).fillna(0)
         
-        # Use hybrid if user logged in, else content-based only
-        if req.user_id and req.user_id in df_user['user_id'].unique():
-            recs = hybrid_recommendation_system(df_products, df_user, req.user_id, item_name, top_n=20)
-        else:
-            recs = content_based_recommendations_improved(df_products, item_name, top_n=10)
+        if len(user_item) < 2:
+            return pd.DataFrame()
         
-        if isinstance(recs, pd.DataFrame):
-            recs = recs.to_dict(orient="records")
+        matrix_norm = pd.DataFrame(
+            normalize(user_item, axis=1, norm='l2'),
+            index=user_item.index, columns=user_item.columns
+        )
         
-        return JSONResponse(content={"recommendations": to_json(recs)})
+        # Find users with similar purchase patterns
+        similarity = cosine_similarity(matrix_norm)
+        target_idx = matrix_norm.index.get_loc(user_id)
+        similar_users = similarity[target_idx].argsort()[::-1][1:11]
+        
+        target_items = set(user_item.columns[user_item.iloc[target_idx] > 0])
+        scores = {}
+        
+        for user_idx in similar_users:
+            sim = similarity[target_idx][user_idx]
+            items = user_item.iloc[user_idx]
+            new_items = set(user_item.columns[(items > 0) & (user_item.iloc[target_idx] == 0)])
+            
+            for item in new_items:
+                scores[item] = scores.get(item, 0) + sim * items[item]
+        
+        if not scores:
+            return pd.DataFrame()
+        
+        top_items = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_n]
+        
+        result = []
+        for product_id, _ in top_items:
+            product = df_product[df_product['productID'] == product_id]
+            if not product.empty:
+                result.append(product.iloc[0])
+        
+        return pd.DataFrame(result).reset_index(drop=True) if result else pd.DataFrame()
+        
+    except Exception as e:
+        print(f"Error: {e}")
+        return pd.DataFrame()
+
+
+# Mix content-based and collaborative filtering (70% content, 30% collaborative)
+def hybrid_recommendation_system(df_product, df_user, user_id, item_name, top_n=20):
+    try:
+        content_recs = content_based_recommendations_improved(df_product, item_name, top_n * 2)
+        
+        if len(content_recs) >= top_n:
+            return content_recs.head(top_n)
+        
+        collab_recs = collaborative_filtering_basic(df_user, df_product, user_id, top_n)
+        
+        if content_recs.empty:
+            return collab_recs.head(top_n)
+        if collab_recs.empty:
+            return content_recs.head(top_n)
+        
+        content_count = int(top_n * 0.7)
+        collab_count = top_n - content_count
+        
+        combined = pd.concat([
+            content_recs.head(content_count),
+            collab_recs[~collab_recs['productID'].isin(content_recs['productID'])].head(collab_count)
+        ]).drop_duplicates(subset=['productID']).head(top_n)
+        
+        return combined
     
     except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+        print(f"Hybrid error: {e}")
+        return content_based_recommendations_improved(df_product, item_name, top_n)
 
-@app.get("/frequently-bought-together")
-async def frequently_bought_together(product_id: str, top_n: int = 6):
+
+# Get top rated products
+def rating_based_recommendation_system(df):
+    try:
+        # Exclude columns with unhashable types (like lists)
+        hashable_cols = []
+        for col in df.columns:
+            if col != 'rating':
+                try:
+                    df[col].apply(hash)
+                    hashable_cols.append(col)
+                except TypeError:
+                    pass
+        
+        if not hashable_cols:
+            # Fallback: just sort by rating
+            return df.sort_values(by='rating', ascending=False).head(10)
+        
+        grouped = df.groupby(hashable_cols)['rating'].mean().reset_index()
+        return grouped.sort_values(by='rating', ascending=False).head(10)
+    except Exception as e:
+        print(f"Rating-based error: {e}")
+        return df.sort_values(by='rating', ascending=False).head(10)
+
+
+# Fuzzy match product names (handles typos)
+def get_closest_match(user_input, all_names):
+    match, score = process.extractOne(user_input, all_names)
+    return match if score > 60 else None
+
+
+# Train ALS (matrix factorization) model for recommendations
+def train_als_model(df_user=None):
+    if df_user is None:
+        _, df_user = making_data()
+    
+    df = df_user[
+        (df_user['productID'].notna()) & 
+        (df_user['productID'] != '') & 
+        (df_user['productID'].astype(str).str.strip() != '')
+    ].copy()
+    
+    if df.empty:
+        return None, None, None, None
+
+    weights = {'view': 1.0, 'cart': 3.0, 'add_to_cart': 3.0, 'purchase': 10.0}
+    df['weight'] = df['event'].map(weights).fillna(0.0)
+
+    agg = df.groupby(['user_id', 'productID'])['weight'].sum().reset_index()
+    agg['user_id'] = agg['user_id'].astype(str)
+    agg['productID'] = agg['productID'].astype(str)
+
+    user_enc = LabelEncoder()
+    item_enc = LabelEncoder()
+    agg['user_idx'] = user_enc.fit_transform(agg['user_id'])
+    agg['item_idx'] = item_enc.fit_transform(agg['productID'])
+    
+    user_item_csr = coo_matrix(
+        (agg['weight'].astype(float), (agg['user_idx'], agg['item_idx'])),
+        shape=(len(user_enc.classes_), len(item_enc.classes_))
+    ).tocsr()
+    
+    # Train on user_item matrix (users x items) so factors match correctly
+    model = AlternatingLeastSquares(factors=20, regularization=0.1, iterations=30, random_state=42)
+    model.fit(user_item_csr.T.tocsr())  # ALS fit needs item_user, but we'll use direct scoring
+    
+    # Return user_item for easier use
+    return model, user_enc, item_enc, user_item_csr
+
+
+# Get recommendations using trained ALS model with direct scoring
+def get_als_recommendations(user_id, model, user_enc, item_enc, interactions, N=10):
+    if model is None or user_enc is None or user_id not in user_enc.classes_:
+        return []
+        
+    try:
+        user_idx = int(user_enc.transform([user_id])[0])
+        
+        # Get user's already interacted items
+        user_row = interactions[user_idx].toarray().flatten()
+        already_liked = set(np.where(user_row > 0)[0])
+        
+        # Check if user has interacted with all items
+        if len(already_liked) >= len(item_enc.classes_):
+            return []
+        
+        # Direct scoring: user_factor @ item_factors.T
+        # Since model was trained on item_user (items x users):
+        # - model.user_factors actually contains item factors (one per row/item)
+        # - model.item_factors actually contains user factors (one per column/user)
+        user_factor = model.item_factors[user_idx]  # Get this user's factor
+        item_factors = model.user_factors  # These are actually item factors
+        
+        # Calculate scores for all items
+        scores = item_factors.dot(user_factor)
+        
+        # Get top N items excluding already liked
+        item_scores = [(idx, score) for idx, score in enumerate(scores) if idx not in already_liked]
+        item_scores.sort(key=lambda x: x[1], reverse=True)
+        top_items = item_scores[:N]
+        
+        # Convert item indices to product IDs
+        item_indices = [idx for idx, _ in top_items]
+        return item_enc.inverse_transform(item_indices).tolist()
+        
+    except Exception as e:
+        print(f"ALS error: {e}")
+        return []
+
+
+# ==================== FREQUENTLY BOUGHT TOGETHER ====================
+
+def build_frequent_itemsets(min_support=0.01, min_confidence=0.3):
+    """
+    Build frequent itemsets from order data using Apriori algorithm.
+    Returns association rules for "frequently bought together" recommendations.
+    
+    Args:
+        min_support: Minimum support threshold (default 0.01 = 1% of orders)
+        min_confidence: Minimum confidence threshold (default 0.3 = 30%)
+    
+    Returns:
+        rules_df: DataFrame with association rules
+        product_pairs: Dict mapping product_id -> list of frequently bought together products
+    """
+    
+    # Check if mlxtend is available
+    if not MLXTEND_AVAILABLE:
+        print("mlxtend not available, skipping Apriori")
+        return pd.DataFrame(), {}
+    
+    try:
+        client = MongoClient(MONGO_URL)
+        db = client["ECommerce"]
+        orders = list(db["orders"].find())
+        
+        if not orders:
+            print("No orders found")
+            return pd.DataFrame(), {}
+        
+        # Build transaction list (each order is a transaction)
+        transactions = []
+        for order in orders:
+            items = order.get("items", [])
+            if len(items) >= 2:  # Only orders with 2+ items for association
+                product_ids = [str(item.get("product", "")) for item in items]
+                product_ids = [pid for pid in product_ids if pid and pid != ""]
+                if len(product_ids) >= 2:
+                    transactions.append(product_ids)
+        
+        if len(transactions) < 10:  # Need minimum transactions
+            print(f"Not enough transactions ({len(transactions)})")
+            return pd.DataFrame(), {}
+        
+        # Create one-hot encoded DataFrame
+        all_products = set()
+        for transaction in transactions:
+            all_products.update(transaction)
+        
+        basket = pd.DataFrame(0, index=range(len(transactions)), columns=list(all_products))
+        
+        for idx, transaction in enumerate(transactions):
+            for product in transaction:
+                basket.at[idx, product] = 1
+        
+        # Apply Apriori algorithm
+        frequent_itemsets = apriori(basket, min_support=min_support, use_colnames=True)
+        
+        if frequent_itemsets.empty:
+            print("No frequent itemsets found, trying lower support")
+            frequent_itemsets = apriori(basket, min_support=0.005, use_colnames=True)
+        
+        if frequent_itemsets.empty:
+            return pd.DataFrame(), {}
+        
+        # Generate association rules
+        rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=min_confidence)
+        
+        if rules.empty:
+            print("No rules found, trying lower confidence")
+            rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=0.1)
+        
+        # Build product pairs dictionary for quick lookup
+        product_pairs = defaultdict(list)
+        
+        for _, rule in rules.iterrows():
+            antecedents = list(rule['antecedents'])
+            consequents = list(rule['consequents'])
+            confidence = rule['confidence']
+            lift = rule['lift']
+            
+            # Only single item antecedents for "bought X also bought Y"
+            if len(antecedents) == 1:
+                product_id = antecedents[0]
+                for consequent in consequents:
+                    product_pairs[product_id].append({
+                        'product_id': consequent,
+                        'confidence': confidence,
+                        'lift': lift
+                    })
+        
+        # Sort by confidence and lift
+        for product_id in product_pairs:
+            product_pairs[product_id] = sorted(
+                product_pairs[product_id],
+                key=lambda x: (x['confidence'] * x['lift']),
+                reverse=True
+            )
+        
+        return rules, dict(product_pairs)
+        
+    except Exception as e:
+        print(f"Error building frequent itemsets: {e}")
+        import traceback
+        traceback.print_exc()
+        return pd.DataFrame(), {}
+
+
+def get_frequently_bought_together(product_id, df_product, top_n=6, min_support=0.01):
     """
     Get products frequently bought together with the given product.
-    This uses Association Rule Mining (Apriori algorithm) to find products 
-    that are commonly purchased together in the same order.
+    This is for showing "People who bought this also bought..." section.
     
-    Query Parameters:
+    Args:
         product_id: The product ID to find associations for
-        top_n: Number of recommendations to return (default: 6)
+        df_product: DataFrame with product information
+        top_n: Number of recommendations to return
+        min_support: Minimum support for association rules
+    
+    Returns:
+        DataFrame with recommended products including names, prices, etc.
     """
     try:
-        df_products, _ = making_data()
+        # Build association rules
+        rules, product_pairs = build_frequent_itemsets(min_support=min_support, min_confidence=0.2)
         
-        # Check if product exists
-        if product_id not in df_products['productID'].values:
-            return JSONResponse(
-                content={"error": "Product not found", "product_id": product_id},
-                status_code=404
-            )
+        # Get recommendations for this product
+        if product_id in product_pairs:
+            recommendations = product_pairs[product_id][:top_n]
+            
+            result = []
+            for rec in recommendations:
+                rec_product_id = rec['product_id']
+                product_info = df_product[df_product['productID'] == rec_product_id]
+                
+                if not product_info.empty:
+                    product_dict = product_info.iloc[0].to_dict()
+                    product_dict['confidence'] = rec['confidence']
+                    product_dict['lift'] = rec['lift']
+                    result.append(product_dict)
+            
+            if result:
+                return pd.DataFrame(result)
         
-        # Get frequently bought together products
-        recommendations = get_frequently_bought_together(
-            product_id, 
-            df_products, 
-            top_n=top_n
-        )
+        # Fallback: If no association rules found, use co-occurrence in same orders
+        return get_co_purchased_products_fallback(product_id, df_product, top_n)
         
-        if recommendations.empty:
-            return JSONResponse(content={
-                "recommendations": [],
-                "count": 0,
-                "message": "No frequently bought together items found",
-                "method": "none"
-            })
-        
-        # Determine method used
-        method = "association_rules" if "confidence" in recommendations.columns else "co_occurrence"
-        
-        return JSONResponse(content={
-            "recommendations": to_json(recommendations.to_dict(orient="records")),
-            "count": len(recommendations),
-            "method": method
-        })
-    
     except Exception as e:
-        return JSONResponse(
-            content={"error": str(e), "product_id": product_id}, 
-            status_code=500
-        )
+        print(f"Error in frequently bought together: {e}")
+        # Fallback to co-occurrence method
+        return get_co_purchased_products_fallback(product_id, df_product, top_n)
+
+
+def get_co_purchased_products_fallback(product_id, df_product, top_n=6):
+    """
+    Fallback method: Find products that appear in same orders (simple co-occurrence).
+    Used when association rules can't be generated.
+    """
+    try:
+        client = MongoClient(MONGO_URL)
+        db = client["ECommerce"]
+        orders = list(db["orders"].find())
+        
+        # Find orders containing the target product
+        co_occurrence = Counter()
+        
+        for order in orders:
+            items = order.get("items", [])
+            product_ids = [str(item.get("product", "")) for item in items if item.get("product")]
+            
+            if product_id in product_ids:
+                # Count other products in same order
+                for pid in product_ids:
+                    if pid != product_id:
+                        co_occurrence[pid] += 1
+        
+        if not co_occurrence:
+            return pd.DataFrame()
+        
+        # Get top N co-occurring products
+        top_products = co_occurrence.most_common(top_n)
+        
+        result = []
+        for pid, count in top_products:
+            product_info = df_product[df_product['productID'] == pid]
+            if not product_info.empty:
+                product_dict = product_info.iloc[0].to_dict()
+                product_dict['co_occurrence_count'] = count
+                result.append(product_dict)
+        
+        return pd.DataFrame(result) if result else pd.DataFrame()
+        
+    except Exception as e:
+        print(f"Error in fallback method: {e}")
+        return pd.DataFrame()
