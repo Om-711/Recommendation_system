@@ -11,3 +11,4 @@ python-multipart
 mlxtend
 implicit
 pymysql
+jinja2
