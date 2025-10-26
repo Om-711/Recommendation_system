@@ -241,12 +241,14 @@ async def user_recommend(req: UserRecommendRequest):
             print(f"❌ User {user_id} not found in database")
             return JSONResponse(
                 content={
+                    "success" : False,
                     "error": "User not found",
                     "user_id": user_id,
                     "message": "This user has no interaction history in our system."
                 }, 
                 status_code=404
             )
+        
         
         # Get user's interaction stats
         user_interactions = df_user[df_user['user_id'] == user_id]
@@ -305,6 +307,7 @@ async def user_recommend(req: UserRecommendRequest):
         print(f"{'='*80}\n")
         
         return JSONResponse(content={
+            "success" : True,
             "recommendations": recs,
             "count": len(recs),
             "method": "collaborative_filtering",
