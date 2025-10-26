@@ -245,8 +245,7 @@ async def user_recommend(req: UserRecommendRequest):
                     "error": "User not found",
                     "user_id": user_id,
                     "message": "This user has no interaction history in our system."
-                }, 
-                status_code=404
+                }
             )
         
         
