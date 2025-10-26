@@ -79,15 +79,7 @@ def making_data():
                     "Timestamp": history.get("time", ""),
                     "duration": history.get("duration", 0) / 1000
                 })
-        else:
-            # User with no browsing history
-            user_data.append({
-                "user_id": user_id,
-                "productID": "",
-                "event": "Not Found",
-                "Timestamp": "",
-                "duration": 0
-            })
+        
 
         # 2️ Orders / Purchases
         user_order_ids = u.get("orders", [])
@@ -631,4 +623,5 @@ def combined_recommendations(user_id, model, user_encoder, item_encoder, interac
     combined = list(als_recs) + [item for item in popular_recs if item not in als_recs]
 
     return combined[:N]
+
 
