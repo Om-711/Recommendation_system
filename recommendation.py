@@ -14,96 +14,103 @@ import os
 from dotenv import load_dotenv
 import pymongo
 
+from pymongo import MongoClient
+import pandas as pd
+
 def making_data():
-        
-    mongo_url = "mongodb+srv://arshadmansuri1825:u1AYlNbjuA5FpHbb@cluster1.2majmfd.mongodb.net/ECommerce"  # e.g. mongodb+srv://username:password@cluster0.mongodb.net/myDatabase?retryWrites=true&w=majority
+    mongo_url = "mongodb+srv://arshadmansuri1825:u1AYlNbjuA5FpHbb@cluster1.2majmfd.mongodb.net/ECommerce"
 
     client = MongoClient(mongo_url)
-
     db = client["ECommerce"]
 
     product_collection = db["products"]
     user_data_collection = db["users"]
-    order_collection = db["orders"]  # Add orders collection
+    order_collection = db["orders"]
 
     products = list(product_collection.find())
-    users  = list(user_data_collection.find())
-    orders = list(order_collection.find())  # Fetch orders
+    users = list(user_data_collection.find())
+    orders = list(order_collection.find())
 
+    # Build order lookup for faster access
+    orders_dict = {str(order["_id"]): order for order in orders}
+
+    # ---- PRODUCT DATA ----
     product_data = []
     for p in products:
-        if(p.get("isActive")):
+        if p.get("isActive"):
             product_data.append({
                 "productID": str(p["_id"]),
-                "name": p["name"],
-                "price": p["price"],
-                "category": p["category"],
+                "name": p.get("name", ""),
+                "price": p.get("price", 0),
+                "category": p.get("category", ""),
                 "description": p.get("description", ""),
                 "images": p.get("images", "Not Found"),
-                "stock" : p.get("stock", "0"),
-                "rating" : p.get("rating", "0"),
-                "reviews" : p.get("reviews", "0"),
+                "stock": p.get("stock", 0),
+                "rating": p.get("rating", 0),
+                "reviews": p.get("reviews", 0),
                 "createdAt": p.get("createdAt", ""),
                 "updatedAt": p.get("updatedAt", ""),
                 "isActive": p.get("isActive", True)
             })
 
+    # ---- USER DATA ----
     user_data = []
     event_types_found = set()
     users_purchase_count = 0
-    
-    # Extract data from users collection
+
     for u in users:
         user_id = str(u["_id"])
-        
-        # Extract browsing history (views, add_to_cart)
-        for history in u.get("history", []):
-            event_obj = history.get("event", {})
-            if isinstance(event_obj, dict):
-                event_type = event_obj.get("type", "Not Found")
-            else:
-                # If event is stored as a string directly
-                event_type = str(event_obj) if event_obj else "Not Found"
-            
-            event_types_found.add(event_type)
-            
+
+        # 1️ Browsing history
+        if u.get("history"):
+            for history in u["history"]:
+                event_obj = history.get("event", {})
+                if isinstance(event_obj, dict):
+                    event_type = event_obj.get("type", "Not Found")
+                else:
+                    event_type = str(event_obj) if event_obj else "Not Found"
+
+                event_types_found.add(event_type)
+
+                user_data.append({
+                    "user_id": user_id,
+                    "productID": str(history.get("productID", "")),
+                    "event": event_type,
+                    "Timestamp": history.get("time", ""),
+                    "duration": history.get("duration", 0) / 1000
+                })
+        else:
+            # User with no browsing history
             user_data.append({
                 "user_id": user_id,
-                "productID": str(history.get("productID", "")),  
-                "event": event_type,
-                "Timestamp": history.get("time", ""),
-                "duration":history.get("duration", 0)/1000 # Convert milli-second to second betwa
+                "productID": "",
+                "event": "Not Found",
+                "Timestamp": "",
+                "duration": 0
             })
-        
-        # Extract purchases from user's orders
-        # users.orders contains order IDs (references to orders collection)
+
+        # 2️ Orders / Purchases
         user_order_ids = u.get("orders", [])
-        if user_order_ids:
-            # Convert ObjectIds to strings for lookup
-            user_order_ids_str = [str(oid) for oid in user_order_ids]
-            
-            # Find matching orders in orders collection
-            for order in orders:
-                order_id_str = str(order.get("_id"))
-                if order_id_str in user_order_ids_str:
-                    # Extract items from this order
-                    order_items = order.get("items", [])
-                    order_date = order.get("createdAt", "")
-                    
-                    for item in order_items:
-                        # item has 'product' field (not productId!)
-                        product_id = str(item.get("product", ""))
-                        if product_id and product_id != "":
-                            user_data.append({
-                                "user_id": user_id,
-                                "productID": product_id,
-                                "event": "purchase",  # This is a purchase!
-                                "Timestamp": order_date,
-                                "duration": 0
-                            })
-                            users_purchase_count += 1
-                            event_types_found.add("purchase")
-    
+        for oid in user_order_ids:
+            order = orders_dict.get(str(oid))
+            if not order:
+                continue
+
+            order_items = order.get("items", [])
+            order_date = order.get("createdAt", "")
+            for item in order_items:
+                product_id = str(item.get("product", ""))
+                if product_id:
+                    user_data.append({
+                        "user_id": user_id,
+                        "productID": product_id,
+                        "event": "purchase",
+                        "Timestamp": order_date,
+                        "duration": 0
+                    })
+                    users_purchase_count += 1
+                    event_types_found.add("purchase")
+
     print(f"\n[DATA EXTRACTION] Extracted {users_purchase_count} purchases from users' orders")
 
     df_products = pd.DataFrame(product_data)
@@ -113,11 +120,12 @@ def making_data():
     df_user = pd.DataFrame(user_data)
     print(f"\n[DATA EXTRACTION] User interactions loaded: {len(df_user)}")
     print(f"[DATA EXTRACTION] Unique users: {df_user['user_id'].nunique()}")
-    print(f"[DATA EXTRACTION] Event types found in database: {event_types_found}")
+    print(f"[DATA EXTRACTION] Event types found: {event_types_found}")
     print(f"[DATA EXTRACTION] Event type counts: {df_user['event'].value_counts().to_dict()}")
     print(df_user.head())
 
     return df_products, df_user
+
 
 
 
@@ -623,3 +631,4 @@ def combined_recommendations(user_id, model, user_encoder, item_encoder, interac
     combined = list(als_recs) + [item for item in popular_recs if item not in als_recs]
 
     return combined[:N]
+
